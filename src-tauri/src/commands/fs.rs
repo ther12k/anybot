@@ -1,0 +1,143 @@
+use std::path::Path;
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
+use crate::models::{DirEntryInfo, FileReadResult, FileWriteResult, SystemInfo};
+use crate::policy::audit;
+
+#[tauri::command]
+pub async fn read_file_content(
+    path: String,
+    max_lines: Option<usize>,
+) -> Result<FileReadResult, String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("File does not exist: {path}"));
+    }
+
+    let meta = fs::metadata(p).await.map_err(|e| e.to_string())?;
+    let size_bytes = meta.len();
+
+    let text = fs::read_to_string(p).await.map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = text.lines().collect();
+    let total_lines = lines.len();
+
+    let content = if let Some(limit) = max_lines {
+        if limit < total_lines {
+            lines[..limit].join("\n")
+        } else {
+            text
+        }
+    } else {
+        text
+    };
+
+    Ok(FileReadResult {
+        content,
+        total_lines,
+        size_bytes,
+    })
+}
+
+#[tauri::command]
+pub async fn write_file_content(
+    path: String,
+    content: String,
+    decision: Option<String>,
+) -> Result<FileWriteResult, String> {
+    let p = Path::new(&path);
+    let decision = decision.unwrap_or_else(|| "approved".to_string());
+
+    // Create parent directories if missing
+    if let Some(parent) = p.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Atomic write: write to temp file then rename
+    let tmp_path = format!("{path}.tmp.{}", std::process::id());
+    let mut file = fs::File::create(&tmp_path).await.map_err(|e| e.to_string())?;
+    file.write_all(content.as_bytes()).await.map_err(|e| e.to_string())?;
+    file.sync_all().await.map_err(|e| e.to_string())?;
+    drop(file);
+
+    fs::rename(&tmp_path, p).await.map_err(|e| e.to_string())?;
+
+    audit(serde_json::json!({
+        "tool": "write_file",
+        "decision": decision,
+        "outcome": "completed",
+        "path": p.display().to_string(),
+        "size_bytes": content.len(),
+    }));
+
+    Ok(FileWriteResult {
+        path,
+        success: true,
+        size_bytes: content.len(),
+    })
+}
+
+#[tauri::command]
+pub async fn list_dir_entries(path: String) -> Result<Vec<DirEntryInfo>, String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("Directory does not exist: {path}"));
+    }
+
+    let mut entries = Vec::new();
+    let mut dir = fs::read_dir(p).await.map_err(|e| e.to_string())?;
+
+    while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let meta = entry.metadata().await.map_err(|e| e.to_string())?;
+        let is_dir = meta.is_dir();
+        let is_file = meta.is_file();
+        let size = meta.len();
+        let entry_path = entry.path().to_string_lossy().to_string();
+
+        entries.push(DirEntryInfo {
+            name,
+            path: entry_path,
+            is_dir,
+            is_file,
+            size,
+        });
+    }
+
+    // Sort directories first, then alphabetical
+    entries.sort_by(|a, b| {
+        if a.is_dir && !b.is_dir {
+            std::cmp::Ordering::Less
+        } else if !a.is_dir && b.is_dir {
+            std::cmp::Ordering::Greater
+        } else {
+            a.name.cmp(&b.name)
+        }
+    });
+
+    Ok(entries)
+}
+
+#[tauri::command]
+pub fn get_system_info() -> Result<SystemInfo, String> {
+    let os = std::env::consts::OS.to_string();
+    let arch = std::env::consts::ARCH.to_string();
+    let username = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    let home_dir = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+
+    Ok(SystemInfo {
+        os,
+        arch,
+        username,
+        cwd,
+        home_dir,
+    })
+}

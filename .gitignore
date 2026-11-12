@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+src-tauri/target/
+
+# Tauri generated
+src-tauri/gen/
+
+# Proprietary input binary (Grok Bot installer — not for redistribution)
+grok-bot_0.79.4_amd64.deb
+
+# Local tooling / workspace config
+.zcode/
+
+# OS / editor cruft
+.DS_Store
+*.log
+*.swp

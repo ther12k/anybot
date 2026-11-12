@@ -1,0 +1,227 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * AnyBot theme — extracted from Grok Bot (sand) v0.79.4 renderer CSS
+ * (--sand-* design tokens, light theme)
+ */
+:root {
+  /* Surfaces */
+  --sand-bg-chrome: #fcfcfc;          /* main window */
+  --sand-bg-sidebar: #f5f5f5;         /* left sidebar */
+  --sand-bg-elevated: #ffffff;        /* cards, composer */
+  --sand-bg-elevated-hover: #f1f1f1;
+  --sand-bg-hover: #1c1c1c0f;         /* 6% black */
+  --sand-bg-active: #1c1c1c14;        /* 8% black */
+
+  /* Text — alphas raised so every functional size passes 4.5:1 on chrome/sidebar
+     (Grok ships fainter steps; hierarchy keeps the same order, lighter = quieter) */
+  --sand-text-primary: #1c1c1c;
+  --sand-text-secondary: #1c1c1cd9;   /* 85% ≈ 10:1 */
+  --sand-text-tertiary: #1c1c1cbf;    /* 75% ≈ 7.3:1 */
+  --sand-text-quaternary: #1c1c1ca6;  /* 65% ≈ 4.85:1 */
+  --sand-text-on-primary: #ffffff;
+
+  /* Borders / strokes */
+  --sand-border-primary-translucent: #1c1c1c3d;
+  --sand-stroke-secondary: #1c1c1c1f; /* 12% */
+  --sand-stroke-tertiary: #1c1c1c14;  /* 8% */
+
+  /* Bubbles */
+  --sand-fill-bubble-user: #1c1c1c;   /* black user bubble */
+  --sand-fill-bubble-agent: #1c1c1c0f;
+  --sand-transcript-prose-bubble-radius: 18px;
+  --sand-conversation-bubble-max-width: 640px;
+  --sand-transcript-prose-line-height: 22px;
+
+  /* Accent (blue) */
+  --sand-bg-accent-primary: #1680f3;
+  --sand-bg-accent-primary-hover: #126fd4;
+  --sand-bg-accent-bright: #1e86fc;
+  --sand-bg-accent-secondary: #1e86fc17;
+
+  /* Status */
+  --sand-bg-danger-primary: #e72e3b;
+  --sand-bg-danger-primary-hover: #c82532;
+  --sand-bg-green-primary: #10ab61;
+
+  /* Type */
+  --sand-font-size-xxs: 11px;
+  --sand-font-size-xs: 12px;
+  --sand-font-size-sm: 13px;
+  --sand-font-size-base: 14px;
+  --sand-font-size-lg: 15px;
+  --sand-line-height-base: 20px;
+
+  --sand-font-family-sans: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Inter", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --sand-font-family-mono: ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* Native dialog chrome — reset UA defaults; backdrop replaces the old overlay div */
+dialog {
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+dialog::backdrop {
+  background: rgba(28, 28, 28, 0.4);
+  backdrop-filter: blur(2px);
+}
+
+/* Reduced motion: kill animation/transition timelines globally; states keep
+   their color/icon cues so nothing is motion-only */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+body {
+  font-family: var(--sand-font-family-sans);
+  font-size: var(--sand-font-size-base);
+  line-height: var(--sand-transcript-prose-line-height);
+  color: var(--sand-text-primary);
+  background: var(--sand-bg-chrome);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Grok-style thin scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1c1c1c1f;
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #1c1c1c3d;
+  background-clip: content-box;
+}
+
+/* Transcript prose (agent markdown) — Grok transcript metrics */
+.transcript-prose {
+  font-size: var(--sand-font-size-base);
+  line-height: var(--sand-transcript-prose-line-height);
+}
+
+.transcript-prose p {
+  margin: 0.5em 0;
+}
+
+.transcript-prose p:first-child {
+  margin-top: 0;
+}
+
+.transcript-prose p:last-child {
+  margin-bottom: 0;
+}
+
+.transcript-prose pre {
+  background: #1c1c1c08;
+  border: 1px solid var(--sand-stroke-tertiary);
+  border-radius: 12px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: var(--sand-font-family-mono);
+  font-size: var(--sand-font-size-xs);
+  line-height: 18px;
+}
+
+.transcript-prose code {
+  font-family: var(--sand-font-family-mono);
+  font-size: 0.9em;
+}
+
+.transcript-prose :not(pre) > code {
+  background: #1c1c1c0f;
+  border-radius: 5px;
+  padding: 1.5px 5px;
+}
+
+.transcript-prose a {
+  color: var(--sand-bg-accent-primary);
+  text-decoration: none;
+}
+
+.transcript-prose a:hover {
+  text-decoration: underline;
+}
+
+.transcript-prose ul,
+.transcript-prose ol {
+  margin: 0.5em 0;
+  padding-left: 1.4em;
+}
+
+.transcript-prose li {
+  margin: 0.2em 0;
+}
+
+.transcript-prose blockquote {
+  border-left: 2px solid var(--sand-stroke-secondary);
+  margin: 0.5em 0;
+  padding-left: 12px;
+  color: var(--sand-text-secondary);
+}
+
+.transcript-prose table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  font-size: var(--sand-font-size-sm);
+}
+
+.transcript-prose th,
+.transcript-prose td {
+  border: 1px solid var(--sand-stroke-secondary);
+  padding: 5px 10px;
+  text-align: left;
+}
+
+.transcript-prose th {
+  background: #1c1c1c08;
+  font-weight: 600;
+}
+
+.transcript-prose h1,
+.transcript-prose h2,
+.transcript-prose h3,
+.transcript-prose h4 {
+  font-weight: 600;
+  margin: 1em 0 0.4em;
+  line-height: 1.3;
+}
+
+.transcript-prose h1 { font-size: 1.35em; }
+.transcript-prose h2 { font-size: 1.2em; }
+.transcript-prose h3 { font-size: 1.08em; }
+
+.transcript-prose hr {
+  border: none;
+  border-top: 1px solid var(--sand-stroke-secondary);
+  margin: 1em 0;
+}
