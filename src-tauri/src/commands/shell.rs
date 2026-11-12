@@ -7,6 +7,7 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use crate::models::{CommandSafetyResult, ShellCommandResult};
 use crate::policy::{audit, load_policy, load_standing_grants_sync};
+use crate::proposal::consume_shell_proposal;
 use crate::security::{evaluate_command_safety, evaluate_with_policy};
 
 /// Shell executions currently running, keyed by the frontend call id.
@@ -71,10 +72,11 @@ pub async fn execute_shell_command(
     timeout_secs: Option<u64>,
     call_id: Option<String>,
     decision: Option<String>,
+    proposal_id: Option<String>,
 ) -> Result<ShellCommandResult, String> {
     let id = call_id.unwrap_or_else(|| format!("auto_{}", std::process::id()));
     let secs = timeout_secs.unwrap_or(60);
-    run_tracked(command, cwd, secs, id, decision).await
+    run_tracked(command, cwd, secs, id, decision, proposal_id).await
 }
 
 /// Kill a running shell execution by its call id. Kills the process group
@@ -115,10 +117,12 @@ fn audit_shell(
     exit_code: Option<i32>,
     duration_ms: Option<u128>,
     call_id: &str,
+    proposal_id: Option<&str>,
 ) {
     audit(serde_json::json!({
         "tool": "execute_shell",
         "decision": decision,
+        "proposal_id": proposal_id,
         "outcome": outcome,
         "command": command,
         "exit_code": exit_code,
@@ -133,14 +137,15 @@ fn audit_shell(
 ///
 /// Trust boundary: the frontend's `decision` string is verified, not
 /// trusted — the policy is re-evaluated here against the CURRENT policy
-/// file and grants. A command that needs approval but arrives without
-/// decision="approved" is refused before any process is spawned.
+/// file and grants. A command that needs approval requires a valid native
+/// proposal token or recorded approval.
 pub async fn run_tracked(
     command: String,
     cwd: Option<String>,
     timeout_secs: u64,
     call_id: String,
     decision: Option<String>,
+    proposal_id: Option<String>,
 ) -> Result<ShellCommandResult, String> {
     let start_time = Instant::now();
 
@@ -149,15 +154,23 @@ pub async fn run_tracked(
     let grants = load_standing_grants_sync();
     let safety = evaluate_with_policy(&command, &policy, &grants, cwd.as_deref());
     let decision = if safety.requires_confirmation {
-        if decision.as_deref() != Some("approved") {
+        if let Some(prop_id) = &proposal_id {
+            consume_shell_proposal(prop_id, &command, cwd.as_deref()).map_err(|e| {
+                let ms = start_time.elapsed().as_millis();
+                audit_shell(&command, "blocked", "proposal_invalid", None, Some(ms), &call_id, proposal_id.as_deref());
+                e
+            })?;
+            "approved".to_string()
+        } else if decision.as_deref() == Some("approved") {
+            "approved".to_string()
+        } else {
             let ms = start_time.elapsed().as_millis();
-            audit_shell(&command, "blocked", "blocked", None, Some(ms), &call_id);
+            audit_shell(&command, "blocked", "blocked", None, Some(ms), &call_id, None);
             return Err(
-                "Blocked by policy: this command requires user approval, and no approval was recorded for it."
+                "Blocked by policy: this command requires user approval via a valid proposal token."
                     .to_string(),
             );
         }
-        "approved".to_string()
     } else if safety.standing_grant {
         "standing_grant".to_string()
     } else {
@@ -190,7 +203,7 @@ pub async fn run_tracked(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            audit_shell(&command, &decision, "spawn_error", None, Some(start_time.elapsed().as_millis()), &call_id);
+            audit_shell(&command, &decision, "spawn_error", None, Some(start_time.elapsed().as_millis()), &call_id, proposal_id.as_deref());
             return Err(format!("Failed to spawn: {e}"));
         }
     };
@@ -258,7 +271,7 @@ pub async fn run_tracked(
             Err(e) => {
                 read_out.abort();
                 read_err.abort();
-                audit_shell(&command, &decision, "error", None, Some(duration_ms), &call_id);
+                audit_shell(&command, &decision, "error", None, Some(duration_ms), &call_id, proposal_id.as_deref());
                 return Err(e.to_string());
             }
         },
@@ -279,7 +292,7 @@ pub async fn run_tracked(
             let _ = child.wait().await; // SIGKILLed leader → returns promptly
             read_out.abort();
             read_err.abort();
-            audit_shell(&command, &decision, "timeout", None, Some(duration_ms), &call_id);
+            audit_shell(&command, &decision, "timeout", None, Some(duration_ms), &call_id, proposal_id.as_deref());
             return Err(format!(
                 "Command execution timed out after {timeout_secs} seconds and its process group was terminated."
             ));
@@ -303,6 +316,7 @@ pub async fn run_tracked(
         Some(exit_code),
         Some(duration_ms),
         &call_id,
+        proposal_id.as_deref(),
     );
 
     Ok(ShellCommandResult {
@@ -326,6 +340,7 @@ mod tests {
             10,
             "t1".into(),
             Some("auto_safe".into()),
+            None,
         )
         .await
         .unwrap();
@@ -342,6 +357,7 @@ mod tests {
             60,
             "t2".into(),
             Some("approved".into()),
+            None,
         ));
 
         // Wait until the child is registered, then kill it.
@@ -386,6 +402,7 @@ mod tests {
             1,
             "t4".into(),
             Some("approved".into()),
+            None,
         )
         .await;
         let elapsed = start.elapsed();
@@ -404,6 +421,7 @@ mod tests {
             10,
             "t5".into(),
             None,
+            None,
         )
         .await;
         assert!(res.is_err(), "mutative command without approval must be refused");
@@ -412,10 +430,47 @@ mod tests {
 
     #[tokio::test]
     async fn safe_command_runs_without_frontend_decision() {
-        let res = run_tracked("echo native-reeval".into(), None, 10, "t6".into(), None)
+        let res = run_tracked("echo native-reeval".into(), None, 10, "t6".into(), None, None)
             .await
             .unwrap();
         assert!(res.success);
         assert!(res.stdout.contains("native-reeval"));
+    }
+
+    #[tokio::test]
+    async fn approved_proposal_token_allows_mutative_command() {
+        use crate::proposal::{create_shell_proposal, approve_proposal};
+        let prop = create_shell_proposal("touch /tmp/anybot-prop-test-ok".into(), None, None)
+            .await
+            .unwrap();
+        // Approve proposal natively
+        assert!(approve_proposal(prop.id.clone()).unwrap());
+
+        // Now run_tracked with proposal_id succeeds
+        let res = run_tracked(
+            "touch /tmp/anybot-prop-test-ok".into(),
+            None,
+            10,
+            "t7".into(),
+            None,
+            Some(prop.id.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(res.success);
+        let _ = std::fs::remove_file("/tmp/anybot-prop-test-ok");
+
+        // Single-use token: second execution must be rejected
+        let res2 = run_tracked(
+            "touch /tmp/anybot-prop-test-ok".into(),
+            None,
+            10,
+            "t8".into(),
+            None,
+            Some(prop.id),
+        )
+        .await;
+        assert!(res2.is_err());
+        assert!(res2.unwrap_err().contains("Blocked: proposal token is not in Approved status"));
     }
 }

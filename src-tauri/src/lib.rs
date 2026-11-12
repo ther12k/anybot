@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod models;
 pub mod policy;
+pub mod proposal;
 pub mod security;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -29,6 +30,11 @@ pub fn run() {
             policy::load_standing_grants,
             policy::save_standing_grants,
             policy::audit_event,
+            proposal::create_write_proposal,
+            proposal::create_shell_proposal,
+            proposal::approve_proposal,
+            proposal::reject_proposal,
+            proposal::cancel_proposal,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

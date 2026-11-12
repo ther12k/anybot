@@ -29,6 +29,8 @@ export interface ToolCallItem {
   status: "pending_approval" | "running" | "completed" | "failed" | "rejected";
   safetyTier?: CommandSafetyTier;
   safetyReason?: string;
+  /** Immutable native proposal token issued by the Rust backend. */
+  proposalId?: string;
   result?: {
     output?: string;
     error?: string;

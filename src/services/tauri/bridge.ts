@@ -82,6 +82,28 @@ async function safeInvoke<T>(cmd: string, args: Record<string, any> = {}): Promi
       size_bytes: args.content.length,
     } as unknown as T;
   }
+  if (cmd === "create_write_proposal") {
+    const existed = args.path.includes("existing") || args.path.includes("README") || args.path.includes("notes");
+    return {
+      id: `prop_w_mock_${Date.now()}`,
+      path: args.path,
+      before: existed ? `# Original content of ${args.path}\n` : "",
+      after: args.content,
+      existed,
+      status: "Pending",
+    } as unknown as T;
+  }
+  if (cmd === "create_shell_proposal") {
+    return {
+      id: `prop_s_mock_${Date.now()}`,
+      command: args.command,
+      cwd: args.cwd,
+      status: "Pending",
+    } as unknown as T;
+  }
+  if (cmd === "approve_proposal" || cmd === "reject_proposal" || cmd === "cancel_proposal") {
+    return true as unknown as T;
+  }
   if (cmd === "list_dir_entries") {
     return [
       { name: "src", path: "/workspace/src", is_dir: true, is_file: false, size: 0 },
@@ -101,7 +123,8 @@ export const TauriBridge = {
     cwd?: string,
     timeoutSecs: number = 60,
     callId?: string,
-    decision?: string
+    decision?: string,
+    proposalId?: string
   ): Promise<{
     stdout: string;
     stderr: string;
@@ -115,12 +138,58 @@ export const TauriBridge = {
       timeoutSecs,
       callId,
       decision,
+      proposalId,
     });
   },
 
   /** Kill a running shell execution (process group) by its call id. */
   killShellCommand: async (callId: string): Promise<boolean> => {
     return safeInvoke("kill_shell_command", { callId });
+  },
+
+  /** Create an immutable native write proposal managed by the Rust backend. */
+  createWriteProposal: async (
+    path: string,
+    content: string,
+    runId?: string
+  ): Promise<{
+    id: string;
+    path: string;
+    before: string;
+    after: string;
+    existed: boolean;
+    status: string;
+  }> => {
+    return safeInvoke("create_write_proposal", { path, content, runId });
+  },
+
+  /** Create an immutable native shell proposal managed by the Rust backend. */
+  createShellProposal: async (
+    command: string,
+    cwd?: string,
+    runId?: string
+  ): Promise<{
+    id: string;
+    command: string;
+    cwd?: string;
+    status: string;
+  }> => {
+    return safeInvoke("create_shell_proposal", { command, cwd, runId });
+  },
+
+  /** Approve an immutable proposal token natively. */
+  approveProposal: async (proposalId: string): Promise<boolean> => {
+    return safeInvoke("approve_proposal", { proposalId });
+  },
+
+  /** Reject an immutable proposal token natively. */
+  rejectProposal: async (proposalId: string): Promise<boolean> => {
+    return safeInvoke("reject_proposal", { proposalId });
+  },
+
+  /** Cancel a proposal token natively. */
+  cancelProposal: async (proposalId: string): Promise<boolean> => {
+    return safeInvoke("cancel_proposal", { proposalId });
   },
 
   /** Standing grants ("Always allow" answers), persisted as JSON. */
@@ -148,9 +217,10 @@ export const TauriBridge = {
   writeFileContent: async (
     path: string,
     content: string,
-    decision?: string
+    decision?: string,
+    proposalId?: string
   ): Promise<{ path: string; success: boolean; size_bytes: number }> => {
-    return safeInvoke("write_file_content", { path, content, decision });
+    return safeInvoke("write_file_content", { path, content, decision, proposalId });
   },
 
   listDirEntries: async (

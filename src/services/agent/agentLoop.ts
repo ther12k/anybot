@@ -21,6 +21,8 @@ interface RunContext {
   hadError: boolean;
   /** Resolvers for approvals still awaiting a user decision. */
   pendingApprovals: Set<(approved: boolean) => void>;
+  /** Pending native proposal IDs for cancellation on abort. */
+  pendingProposals: Set<string>;
   /** Shell executions currently running, so Stop can kill them natively. */
   runningShellCalls: Map<string, true>;
 }
@@ -63,6 +65,10 @@ export class AgentLoop {
     run.controller.abort();
     for (const resolve of run.pendingApprovals) resolve(false);
     run.pendingApprovals.clear();
+    for (const propId of run.pendingProposals) {
+      TauriBridge.cancelProposal(propId).catch(() => {});
+    }
+    run.pendingProposals.clear();
     for (const callId of run.runningShellCalls.keys()) {
       TauriBridge.killShellCommand(callId).catch(() => {
         // Already finished or unsupported — the bounded timeout still applies.
@@ -95,6 +101,7 @@ export class AgentLoop {
       aborted: false,
       hadError: false,
       pendingApprovals: new Set(),
+      pendingProposals: new Set(),
       runningShellCalls: new Map(),
     };
     this.activeRun = run;
@@ -368,49 +375,62 @@ export class AgentLoop {
     toolCall.safetyReason = safetyReason;
 
     if (requiresApproval) {
-      // write_file: prepare the PROPOSAL first — the reviewer sees the exact
-      // diff before any approval control appears (UX-07). Read failures are
-      // distinguished: ONLY a real missing file enters the "new file" path;
-      // binary/permission/IO errors refuse the proposal instead of guessing.
+      // Prepare immutable native proposal managed by Rust.
+      // write_file reads disk content natively, hashes it, and checks protected paths.
+      // execute_shell registers the exact command and working directory.
       if (toolCall.name === "write_file") {
-        let beforeContent = "";
-        let existed: boolean | "unknown" = false;
         try {
-          const prev = await TauriBridge.readFileContent(toolCall.arguments.path);
-          beforeContent = prev.content;
-          existed = true;
+          const prop = await TauriBridge.createWriteProposal(
+            toolCall.arguments.path,
+            toolCall.arguments.content ?? "",
+            run.id
+          );
+          toolCall.proposalId = prop.id;
+          run.pendingProposals.add(prop.id);
+          toolCall.result = {
+            diff: {
+              before: prop.before,
+              after: prop.after,
+              path: prop.path,
+              existed: prop.existed,
+            },
+          };
         } catch (e: any) {
-          const msg = String(e?.message ?? e);
-          if (msg.startsWith("NOT_FOUND:")) {
-            existed = false; // genuinely a new file
-            beforeContent = "";
-          } else {
-            existed = "unknown";
-          }
-        }
-        if (existed === "unknown") {
           toolCall.status = "failed";
           toolCall.result = {
-            error:
-              "Cannot read the current file (it may be binary, unreadable, or locked). Refusing to propose a change without knowing what would be replaced — try reading it first or choose a different target.",
+            error: String(e?.message ?? e),
           };
           onUpdate(toolCall);
           return;
         }
-        if (run.aborted) return cancelTool();
-        toolCall.result = {
-          diff: {
-            before: beforeContent,
-            after: toolCall.arguments.content ?? "",
-            path: toolCall.arguments.path ?? "",
-            existed,
-          },
-        };
+      } else if (toolCall.name === "execute_shell") {
+        try {
+          const prop = await TauriBridge.createShellProposal(
+            toolCall.arguments.command,
+            toolCall.arguments.cwd,
+            run.id
+          );
+          toolCall.proposalId = prop.id;
+          run.pendingProposals.add(prop.id);
+        } catch (e: any) {
+          toolCall.status = "failed";
+          toolCall.result = {
+            error: String(e?.message ?? e),
+          };
+          onUpdate(toolCall);
+          return;
+        }
       }
 
       // Stop during a preflight must not register a fresh approval nothing
       // will ever resolve.
-      if (run.aborted) return cancelTool();
+      if (run.aborted) {
+        if (toolCall.proposalId) {
+          TauriBridge.cancelProposal(toolCall.proposalId).catch(() => {});
+          run.pendingProposals.delete(toolCall.proposalId);
+        }
+        return cancelTool();
+      }
 
       toolCall.status = "pending_approval";
       onUpdate(toolCall);
@@ -427,11 +447,19 @@ export class AgentLoop {
       });
 
       if (!approved) {
+        if (toolCall.proposalId) {
+          if (run.aborted) {
+            TauriBridge.cancelProposal(toolCall.proposalId).catch(() => {});
+          } else {
+            TauriBridge.rejectProposal(toolCall.proposalId).catch(() => {});
+          }
+          run.pendingProposals.delete(toolCall.proposalId);
+        }
         toolCall.status = "rejected";
         toolCall.result = {
           error: run.aborted
-            ? "Cancelled by user (Stop). Nothing was written."
-            : "Change declined by user. Nothing was written.",
+            ? "Cancelled by user (Stop). Nothing was executed."
+            : "Action declined by user. Nothing was executed.",
           // Keep the proposal visible for reference, marked declined.
           diff: toolCall.result?.diff,
         };
@@ -446,10 +474,20 @@ export class AgentLoop {
         }).catch(() => {});
         return;
       }
+
+      // User approved: approve natively in Rust registry
+      if (toolCall.proposalId) {
+        await TauriBridge.approveProposal(toolCall.proposalId).catch(() => {});
+        run.pendingProposals.delete(toolCall.proposalId);
+      }
       decision = "approved";
     }
 
     if (run.aborted) {
+      if (toolCall.proposalId) {
+        TauriBridge.cancelProposal(toolCall.proposalId).catch(() => {});
+        run.pendingProposals.delete(toolCall.proposalId);
+      }
       toolCall.status = "rejected";
       toolCall.result = { error: "Cancelled by user (Stop)." };
       onUpdate(toolCall);
@@ -470,7 +508,8 @@ export class AgentLoop {
             toolCall.arguments.cwd,
             60,
             toolCall.id,
-            decision
+            decision,
+            toolCall.proposalId
           );
         } finally {
           run.runningShellCalls.delete(toolCall.id);
@@ -495,19 +534,7 @@ export class AgentLoop {
           output: res.content,
         };
       } else if (toolCall.name === "write_file") {
-        // Approval was bound to the reviewed proposal. Verify the file still
-        // matches what was shown; a changed file makes the proposal stale and
-        // sends the user back to review instead of overwriting blindly.
         const reviewed = toolCall.result?.diff;
-        let currentContent: string | null = null;
-        try {
-          currentContent = (await TauriBridge.readFileContent(toolCall.arguments.path)).content;
-        } catch {
-          currentContent = null; // still missing
-        }
-
-        // Stop may land while the re-read above is in flight — it must win
-        // over the mutation that was about to follow it.
         if (run.aborted) {
           toolCall.status = "rejected";
           toolCall.result = {
@@ -515,31 +542,17 @@ export class AgentLoop {
             ...(reviewed ? { diff: reviewed } : {}),
           };
         } else {
-          const stale = reviewed
-            ? reviewed.existed
-              ? currentContent !== reviewed.before
-              : currentContent !== null
-            : true; // no recorded proposal — refuse to write blind
-
-          if (stale) {
-            toolCall.status = "failed";
-            toolCall.result = {
-              error:
-                "File changed after review — this proposal is stale and nothing was written. Ask the agent to review the file and propose the change again.",
-              diff: reviewed,
-            };
-          } else {
-            const res = await TauriBridge.writeFileContent(
-              toolCall.arguments.path,
-              toolCall.arguments.content,
-              decision
-            );
-            toolCall.status = res.success ? "completed" : "failed";
-            toolCall.result = {
-              output: `Wrote ${res.size_bytes} bytes to ${res.path}`,
-              diff: reviewed,
-            };
-          }
+          const res = await TauriBridge.writeFileContent(
+            toolCall.arguments.path,
+            toolCall.arguments.content,
+            decision,
+            toolCall.proposalId
+          );
+          toolCall.status = res.success ? "completed" : "failed";
+          toolCall.result = {
+            output: `Wrote ${res.size_bytes} bytes to ${res.path}`,
+            diff: reviewed,
+          };
         }
       } else if (toolCall.name === "list_directory") {
         const entries = await TauriBridge.listDirEntries(toolCall.arguments.path);
