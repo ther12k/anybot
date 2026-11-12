@@ -17,10 +17,30 @@ interface RunContext {
   id: string;
   controller: AbortController;
   aborted: boolean;
+  /** Set when a provider/turn error was rendered into the transcript. */
+  hadError: boolean;
   /** Resolvers for approvals still awaiting a user decision. */
   pendingApprovals: Set<(approved: boolean) => void>;
   /** Shell executions currently running, so Stop can kill them natively. */
   runningShellCalls: Map<string, true>;
+}
+
+/** Honest terminal outcome of a whole run chain. */
+export type RunOutcome = "completed" | "cancelled" | "failed";
+
+/** The system working directory, resolved once and reused so safety checks,
+ *  executions, and "Always allow" grants all agree on the same workspace. */
+let cachedSystemCwd: string | null = null;
+async function resolveCwd(explicit?: string): Promise<string | undefined> {
+  if (explicit && explicit.trim()) return explicit;
+  if (cachedSystemCwd === null) {
+    try {
+      cachedSystemCwd = (await TauriBridge.getSystemInfo()).cwd;
+    } catch {
+      cachedSystemCwd = "";
+    }
+  }
+  return cachedSystemCwd || undefined;
 }
 
 export class AgentLoop {
@@ -55,6 +75,7 @@ export class AgentLoop {
   /**
    * Run one turn chain. Concurrency policy: one run at a time — a second
    * concurrent call is refused instead of silently sharing a controller.
+   * Resolves with an honest terminal outcome for status display.
    */
   public async runTurn(
     threadId: string,
@@ -65,13 +86,14 @@ export class AgentLoop {
     onUpdateEntry: (entry: TranscriptEntry) => void,
     onAddEntry: (entry: TranscriptEntry) => void,
     onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean) => void) => void
-  ): Promise<void> {
-    if (this.activeRun) return;
+  ): Promise<RunOutcome> {
+    if (this.activeRun) return "cancelled";
 
     const run: RunContext = {
       id: `run_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       controller: new AbortController(),
       aborted: false,
+      hadError: false,
       pendingApprovals: new Set(),
       runningShellCalls: new Map(),
     };
@@ -86,6 +108,7 @@ export class AgentLoop {
       // can no longer detach a newer run's controller or approvals.
       if (this.activeRun === run) this.activeRun = null;
     }
+    return run.aborted ? "cancelled" : run.hadError ? "failed" : "completed";
   }
 
   private async executeTurn(
@@ -259,6 +282,19 @@ export class AgentLoop {
       }
     } catch (err: any) {
       if (run.aborted || signal.aborted) return;
+      run.hadError = true;
+      // A response that never completed must not leave tool calls armed:
+      // reject anything still pending so it can never execute later.
+      for (const tc of toolCalls) {
+        if (tc.status === "pending_approval") {
+          tc.status = "rejected";
+          tc.result = {
+            error:
+              "Not executed — the response was interrupted before the model finished.",
+            ...(tc.result?.diff ? { diff: tc.result.diff } : {}),
+          };
+        }
+      }
       // streamClient rethrows provider failures with recovery text in the message
       onUpdateEntry({
         ...assistantEntry,
@@ -281,6 +317,17 @@ export class AgentLoop {
     onUpdate: (tc: ToolCallItem) => void,
     onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean) => void) => void
   ): Promise<void> {
+    /** Mark the tool cancelled — used after every awaited preflight, so a
+     *  Stop that lands mid-check never lets the action proceed. */
+    const cancelTool = () => {
+      toolCall.status = "rejected";
+      toolCall.result = {
+        error: "Cancelled by user (Stop). Nothing was executed.",
+        ...(toolCall.result?.diff ? { diff: toolCall.result.diff } : {}),
+      };
+      onUpdate(toolCall);
+    };
+
     // 1. Safety evaluation — decision provenance feeds the audit log.
     // Effective auto-run = agent toggle AND global vault toggle (both must
     // allow it; a restrictive setting wins).
@@ -293,8 +340,12 @@ export class AgentLoop {
       vault.autoApproveSafeTools !== false && bot.autoApproveSafeTools !== false;
 
     if (toolCall.name === "execute_shell") {
-      const cwd = toolCall.arguments.cwd || undefined;
+      // Same cwd for the safety check AND the execution, so a workspace-
+      // scoped standing grant matches both times.
+      const cwd = await resolveCwd(toolCall.arguments.cwd);
       const safety = await TauriBridge.checkShellSafety(toolCall.arguments.command || "", cwd);
+      if (run.aborted) return cancelTool();
+      toolCall.arguments.cwd = cwd;
       safetyTier = safety.tier;
       safetyReason = safety.reason;
       if (safety.standing_grant) {
@@ -318,17 +369,35 @@ export class AgentLoop {
 
     if (requiresApproval) {
       // write_file: prepare the PROPOSAL first — the reviewer sees the exact
-      // diff before any approval control appears (UX-07).
+      // diff before any approval control appears (UX-07). Read failures are
+      // distinguished: ONLY a real missing file enters the "new file" path;
+      // binary/permission/IO errors refuse the proposal instead of guessing.
       if (toolCall.name === "write_file") {
         let beforeContent = "";
-        let existed = false;
+        let existed: boolean | "unknown" = false;
         try {
           const prev = await TauriBridge.readFileContent(toolCall.arguments.path);
           beforeContent = prev.content;
           existed = true;
-        } catch {
-          existed = false; // new file
+        } catch (e: any) {
+          const msg = String(e?.message ?? e);
+          if (msg.startsWith("NOT_FOUND:")) {
+            existed = false; // genuinely a new file
+            beforeContent = "";
+          } else {
+            existed = "unknown";
+          }
         }
+        if (existed === "unknown") {
+          toolCall.status = "failed";
+          toolCall.result = {
+            error:
+              "Cannot read the current file (it may be binary, unreadable, or locked). Refusing to propose a change without knowing what would be replaced — try reading it first or choose a different target.",
+          };
+          onUpdate(toolCall);
+          return;
+        }
+        if (run.aborted) return cancelTool();
         toolCall.result = {
           diff: {
             before: beforeContent,
@@ -338,6 +407,10 @@ export class AgentLoop {
           },
         };
       }
+
+      // Stop during a preflight must not register a fresh approval nothing
+      // will ever resolve.
+      if (run.aborted) return cancelTool();
 
       toolCall.status = "pending_approval";
       onUpdate(toolCall);
@@ -433,30 +506,40 @@ export class AgentLoop {
           currentContent = null; // still missing
         }
 
-        const stale = reviewed
-          ? reviewed.existed
-            ? currentContent !== reviewed.before
-            : currentContent !== null
-          : true; // no recorded proposal — refuse to write blind
-
-        if (stale) {
-          toolCall.status = "failed";
+        // Stop may land while the re-read above is in flight — it must win
+        // over the mutation that was about to follow it.
+        if (run.aborted) {
+          toolCall.status = "rejected";
           toolCall.result = {
-            error:
-              "File changed after review — this proposal is stale and nothing was written. Ask the agent to review the file and propose the change again.",
-            diff: reviewed,
+            error: "Cancelled by user (Stop). Nothing was written.",
+            ...(reviewed ? { diff: reviewed } : {}),
           };
         } else {
-          const res = await TauriBridge.writeFileContent(
-            toolCall.arguments.path,
-            toolCall.arguments.content,
-            decision
-          );
-          toolCall.status = res.success ? "completed" : "failed";
-          toolCall.result = {
-            output: `Wrote ${res.size_bytes} bytes to ${res.path}`,
-            diff: reviewed,
-          };
+          const stale = reviewed
+            ? reviewed.existed
+              ? currentContent !== reviewed.before
+              : currentContent !== null
+            : true; // no recorded proposal — refuse to write blind
+
+          if (stale) {
+            toolCall.status = "failed";
+            toolCall.result = {
+              error:
+                "File changed after review — this proposal is stale and nothing was written. Ask the agent to review the file and propose the change again.",
+              diff: reviewed,
+            };
+          } else {
+            const res = await TauriBridge.writeFileContent(
+              toolCall.arguments.path,
+              toolCall.arguments.content,
+              decision
+            );
+            toolCall.status = res.success ? "completed" : "failed";
+            toolCall.result = {
+              output: `Wrote ${res.size_bytes} bytes to ${res.path}`,
+              diff: reviewed,
+            };
+          }
         }
       } else if (toolCall.name === "list_directory") {
         const entries = await TauriBridge.listDirEntries(toolCall.arguments.path);

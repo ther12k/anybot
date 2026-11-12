@@ -269,6 +269,13 @@ pub async fn run_tracked(
             if let Some(p) = pid {
                 kill_process_group(p);
             }
+            // Non-Unix: there is no process-group kill; at least terminate
+            // the leader so a timed-out cmd.exe can't hold the run open.
+            // Descendant termination on Windows remains a known limitation.
+            #[cfg(not(unix))]
+            {
+                let _ = child.start_kill();
+            }
             let _ = child.wait().await; // SIGKILLed leader → returns promptly
             read_out.abort();
             read_err.abort();

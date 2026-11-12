@@ -192,6 +192,9 @@ async function streamAnthropic(
   const decoder = new TextDecoder();
   let buffer = "";
   let currentToolCall: any = null;
+  // A transport EOF is NOT completion: Anthropic must deliver message_stop,
+  // otherwise the response was cut off mid-turn.
+  let sawMessageStop = false;
 
   while (true) {
     const { done, value } = await readWithWatchdog(() => reader.read(), signal);
@@ -220,6 +223,9 @@ async function streamAnthropic(
         throw new Error(
           `Anthropic stream error: ${parsed.error?.message ?? JSON.stringify(parsed.error ?? parsed)}`
         );
+      }
+      if (parsed.type === "message_stop") {
+        sawMessageStop = true;
       }
 
       try {
@@ -265,6 +271,15 @@ async function streamAnthropic(
         // Continue parsing
       }
     }
+  }
+
+  // EOF without message_stop = the response never finished. Fail loudly so
+  // the partial text is kept but its tool calls are not executed (the agent
+  // loop rejects any pending_approval calls from an errored turn).
+  if (!sawMessageStop) {
+    throw new Error(
+      "The response stream ended before the model finished (no completion event). The partial answer above may be incomplete — send again to continue."
+    );
   }
 
   callbacks.onFinished?.();
@@ -345,6 +360,9 @@ async function streamOpenAI(
   const decoder = new TextDecoder();
   let buffer = "";
   const toolCallAccumulators: Record<number, { id: string; name: string; args: string }> = {};
+  // finish_reason is the protocol's completion signal; a bare EOF is a cut
+  // response, not a finished one.
+  let finishReason: string | null = null;
 
   while (true) {
     const { done, value } = await readWithWatchdog(() => reader.read(), signal);
@@ -377,6 +395,9 @@ async function streamOpenAI(
       try {
         const choice = parsed.choices?.[0];
         if (!choice) continue;
+        if (choice.finish_reason) {
+          finishReason = String(choice.finish_reason);
+        }
 
         const delta = choice.delta;
         if (!delta) continue;
@@ -416,6 +437,15 @@ async function streamOpenAI(
     }
   }
 
+  // A stream that closes without finish_reason never completed: flush
+  // nothing onward as success. Throwing keeps the partial text and stops
+  // the agent loop from executing tool calls of an unfinished response.
+  if (!finishReason) {
+    throw new Error(
+      "The response stream ended before the model finished (no finish_reason). The partial answer above may be incomplete — send again to continue."
+    );
+  }
+
   // Flush accumulated tool calls
   for (const tc of Object.values(toolCallAccumulators)) {
     let args = {};
@@ -447,6 +477,9 @@ async function streamOllama(
 ) {
   const baseUrl = (vault.ollamaBaseUrl?.trim() || "http://localhost:11434").replace(/\/$/, "");
 
+  // Preserve the tool protocol in history: assistant tool_calls round-trip
+  // (arguments as an object, per Ollama's format) and tool results keep
+  // flowing so multi-step tool use keeps its context.
   const formattedMessages: any[] = [
     { role: "system", content: systemPrompt },
     ...messages.map((m) => {
@@ -456,10 +489,22 @@ async function streamOllama(
           content: m.content,
         };
       }
-      return {
+      const entry: any = {
         role: m.role,
         content: m.content,
       };
+      if (m.tool_calls && m.tool_calls.length > 0) {
+        entry.tool_calls = m.tool_calls.map((tc) => {
+          let args: any = {};
+          try {
+            args = JSON.parse(tc.function?.arguments || "{}");
+          } catch {
+            args = {};
+          }
+          return { function: { name: tc.function?.name, arguments: args } };
+        });
+      }
+      return entry;
     }),
   ];
 
@@ -497,6 +542,9 @@ async function streamOllama(
   const decoder = new TextDecoder();
   let buffer = "";
   let insideThinkTag = false;
+  // Ollama's contract: the final NDJSON line carries done=true. A closed
+  // body without it is an interrupted stream.
+  let sawDone = false;
 
   while (true) {
     const { done, value } = await readWithWatchdog(() => reader.read(), signal);
@@ -520,6 +568,9 @@ async function streamOllama(
       }
       if (parsed.error) {
         throw new Error(`Ollama stream error: ${parsed.error}`);
+      }
+      if (parsed.done === true) {
+        sawDone = true;
       }
 
       try {
@@ -566,6 +617,12 @@ async function streamOllama(
         // Continue
       }
     }
+  }
+
+  if (!sawDone) {
+    throw new Error(
+      "The response stream ended before the model finished (no done marker). The partial answer above may be incomplete — send again to continue."
+    );
   }
 
   callbacks.onFinished?.();

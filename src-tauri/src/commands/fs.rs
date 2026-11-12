@@ -1,8 +1,8 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use crate::models::{DirEntryInfo, FileReadResult, FileWriteResult, SystemInfo};
-use crate::policy::audit;
+use crate::policy::{audit, config_dir};
 
 fn audit_fs(tool: &str, outcome: &str, path: &str, decision: &str, error: Option<&str>) {
     audit(serde_json::json!({
@@ -14,11 +14,40 @@ fn audit_fs(tool: &str, outcome: &str, path: &str, decision: &str, error: Option
     }));
 }
 
+/// The app's own governance files (API keys, policy, grants, audit log)
+/// must never enter model context or be writable by tools — an unrestricted
+/// read would otherwise exfiltrate stored credentials, and a write could
+/// rewrite the permission boundary itself.
+fn is_protected_path(path: &str) -> bool {
+    let protected = ["config.json", "policy.json", "standing-grants.json", "audit.jsonl"];
+    let resolved = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => PathBuf::from(path),
+    };
+    if let Some(parent) = resolved.parent() {
+        let parent_str = parent.to_string_lossy();
+        let cfg = config_dir();
+        let is_config_parent = parent_str == cfg.to_string_lossy()
+            || std::fs::canonicalize(&cfg).map(|c| c == parent).unwrap_or(false);
+        if is_config_parent {
+            if let Some(name) = resolved.file_name() {
+                return protected.iter().any(|p| name.eq_ignore_ascii_case(p));
+            }
+        }
+    }
+    false
+}
+
 #[tauri::command]
 pub async fn read_file_content(
     path: String,
     max_lines: Option<usize>,
 ) -> Result<FileReadResult, String> {
+    if is_protected_path(&path) {
+        let msg = "PROTECTED: this file is part of AnyBot's own configuration and cannot be read by tools.".to_string();
+        audit_fs("read_file", "blocked", &path, "auto_safe", Some(&msg));
+        return Err(msg);
+    }
     let result = read_file_inner(&path, max_lines).await;
     match &result {
         Ok(_) => audit_fs("read_file", "completed", &path, "auto_safe", None),
@@ -30,7 +59,10 @@ pub async fn read_file_content(
 async fn read_file_inner(path: &str, max_lines: Option<usize>) -> Result<FileReadResult, String> {
     let p = Path::new(path);
     if !p.exists() {
-        return Err(format!("File does not exist: {path}"));
+        // Machine-readable marker: only this exact condition may enter the
+        // "new file" proposal path. Binary/permission/IO errors are plain
+        // strings and must NEVER be treated as "file did not exist".
+        return Err(format!("NOT_FOUND: {path}"));
     }
 
     let meta = fs::metadata(p).await.map_err(|e| e.to_string())?;
@@ -81,6 +113,12 @@ pub async fn write_file_content(
             );
         }
     };
+
+    if is_protected_path(&path) {
+        let msg = "PROTECTED: this file is part of AnyBot's own configuration and cannot be modified by tools.".to_string();
+        audit_fs("write_file", "blocked", &path, decision, Some(&msg));
+        return Err(msg);
+    }
 
     let result = write_file_inner(&path, &content).await;
     match &result {

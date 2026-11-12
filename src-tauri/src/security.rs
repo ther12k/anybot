@@ -106,7 +106,8 @@ pub fn evaluate_with_policy(
             lower == p || lower.starts_with(&format!("{p} "))
         };
         policy.allow_phrases.iter().any(|p| matches_phrase(p))
-            || policy.allow_read_only.iter().any(|c| c.eq(first_word))
+            || (policy.allow_read_only.iter().any(|c| c.eq(first_word))
+                && command_args_are_safe(first_word, &tokens[1..]))
     };
 
     if is_read_only {
@@ -172,10 +173,13 @@ fn git_subcommand_is_read_only(sub: &str, args: &[&str]) -> bool {
             })
         }
         // Listing plus positional inspection subcommands; add/rename/remove/
-        // set-url/prune and friends all mutate the repository config.
+        // set-url/prune and friends all mutate the repository config. A
+        // leading -v/--verbose does NOT make the rest safe — `git remote -v
+        // remove origin` still deletes — so the remaining args are validated
+        // the same way.
         "remote" => match args.first().copied().unwrap_or("") {
             "" => true,
-            "-v" | "--verbose" => true,
+            "-v" | "--verbose" => git_subcommand_is_read_only("remote", &args[1..]),
             "show" | "get-url" => args.len() >= 2,
             _ => false,
         },
@@ -202,10 +206,32 @@ fn git_subcommand_is_read_only(sub: &str, args: &[&str]) -> bool {
                     || a.starts_with("-n")
             })
         }
-        // Pure readers for every flag form: nothing to validate.
+        // Pure readers EXCEPT their file-writing flags: `git diff
+        // --output=f` (and show's) writes a file. Unknown writing forms
+        // fail closed below.
         "status" | "log" | "diff" | "show" | "describe" | "rev-parse"
-        | "blame" | "shortlog" | "ls-files" => true,
+        | "blame" | "shortlog" | "ls-files" => {
+            !args.iter().any(|a| a.starts_with("--output"))
+        }
         _ => false,
+    }
+}
+
+/// Argument validation for name-allowlisted commands that have flags able
+/// to execute helper programs or otherwise mutate. Anything unrecognised
+/// here keeps the command read-only-safe; the goal is to catch the known
+/// exec-shaped forms, and unknown forms still fail closed overall because
+/// they must ALSO be on the name allowlist to be considered at all.
+fn command_args_are_safe(first_word: &str, args: &[&str]) -> bool {
+    match first_word {
+        // `rg --pre <cmd>` runs <cmd> as a preprocessor on every file.
+        "rg" => !args.iter().any(|a| {
+            *a == "--pre" || a.starts_with("--pre=") || *a == "--pre-glob"
+                || a.starts_with("--pre-glob=")
+        }),
+        // Everything else on the allowlist has no known exec-flags; the
+        // compound/redirect checks have already run.
+        _ => true,
     }
 }
 
@@ -288,6 +314,48 @@ mod tests {
         let res = evaluate_with_policy("ls & touch example.txt", &policy(), &[], None);
         assert_eq!(res.tier, CommandSafetyTier::Mutative);
         assert!(res.requires_confirmation);
+    }
+
+    #[test]
+    fn git_remote_verbose_does_not_whitelist_remove() {
+        // `-v` first used to short-circuit the rest of the args.
+        let res = evaluate_with_policy("git remote -v remove origin", &policy(), &[], None);
+        assert_eq!(res.tier, CommandSafetyTier::Mutative);
+        assert!(res.requires_confirmation);
+        // Verbose listing stays safe.
+        let res = evaluate_with_policy("git remote -v", &policy(), &[], None);
+        assert_eq!(res.tier, CommandSafetyTier::Safe);
+    }
+
+    #[test]
+    fn git_diff_output_flag_writes_a_file() {
+        let res = evaluate_with_policy(
+            "git diff --no-index --output=diff.txt a.txt b.txt",
+            &policy(),
+            &[],
+            None,
+        );
+        assert_eq!(res.tier, CommandSafetyTier::Mutative);
+        assert!(res.requires_confirmation);
+        // Plain diff stays safe.
+        let res = evaluate_with_policy("git diff --stat a.txt b.txt", &policy(), &[], None);
+        assert_eq!(res.tier, CommandSafetyTier::Safe);
+    }
+
+    #[test]
+    fn rg_preprocessor_flag_requires_approval() {
+        for cmd in [
+            "rg --pre=./preprocessor.sh pattern file",
+            "rg --pre ./preprocessor.sh pattern file",
+            "rg pattern --pre-glob='*.rs' file",
+        ] {
+            let res = evaluate_with_policy(cmd, &policy(), &[], None);
+            assert_eq!(res.tier, CommandSafetyTier::Mutative, "expected approval: {cmd}");
+            assert!(res.requires_confirmation);
+        }
+        // Ordinary rg stays safe.
+        let res = evaluate_with_policy("rg -n pattern .", &policy(), &[], None);
+        assert_eq!(res.tier, CommandSafetyTier::Safe);
     }
 
     #[test]

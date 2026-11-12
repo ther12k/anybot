@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-fn config_dir() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         if let Ok(app_data) = std::env::var("APPDATA") {
@@ -123,17 +123,43 @@ pub struct PolicyFile {
     pub policy: Policy,
 }
 
+/// Current policy schema version. Bump when the built-in defaults change in
+/// a way that must reach upgraded installs (v1 installs persisted older,
+/// unsafe allow_phrases such as `cargo check`).
+pub const POLICY_VERSION: u32 = 2;
+
+/// Phrases that v1 defaults allowed but that execute code (build scripts /
+/// package installs). A v1 policy file carrying them is migrated by
+/// dropping them — user-added entries are kept.
+const RETIRED_UNSAFE_PHRASES: &[&str] = &[
+    "cargo check",
+    "cargo tree",
+    "cargo metadata",
+    "npx tsc --noEmit",
+];
+
+fn migrate_policy(mut policy: Policy, version: u32) -> Policy {
+    if version < 2 {
+        policy
+            .allow_phrases
+            .retain(|p| !RETIRED_UNSAFE_PHRASES.iter().any(|bad| p.eq_ignore_ascii_case(bad)));
+    }
+    policy
+}
+
 /// Load the policy file. Missing → write defaults so the file is
 /// discoverable. Corrupt/unreadable → built-in conservative fallback where
 /// the allowlists are empty (everything requires approval) but the built-in
-/// deny patterns still tag destructive commands.
+/// deny patterns still tag destructive commands. Older schema versions are
+/// migrated (retired unsafe defaults removed) and persisted back at the
+/// current version.
 pub fn load_policy() -> Policy {
     let path = policy_path();
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(_) => {
             // First run: persist defaults for discoverability, best-effort.
-            let file = PolicyFile { version: 1, policy: Policy::default() };
+            let file = PolicyFile { version: POLICY_VERSION, policy: Policy::default() };
             let _ = std::fs::create_dir_all(config_dir());
             let _ = std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap_or_default());
             return Policy::default();
@@ -141,7 +167,15 @@ pub fn load_policy() -> Policy {
     };
 
     match serde_json::from_str::<PolicyFile>(&text) {
-        Ok(f) => f.policy,
+        Ok(f) => {
+            let policy = migrate_policy(f.policy, f.version);
+            if f.version != POLICY_VERSION {
+                // Persist the migration so upgrades converge on v2.
+                let file = PolicyFile { version: POLICY_VERSION, policy: policy.clone() };
+                let _ = std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap_or_default());
+            }
+            policy
+        }
         Err(_) => Policy {
             deny_patterns: default_deny_patterns(),
             deny_commands: vec![],
@@ -255,12 +289,37 @@ mod tests {
 
     #[test]
     fn defaults_survive_roundtrip() {
-        let file = PolicyFile { version: 1, policy: Policy::default() };
+        let file = PolicyFile { version: POLICY_VERSION, policy: Policy::default() };
         let json = serde_json::to_string(&file).unwrap();
         let back: PolicyFile = serde_json::from_str(&json).unwrap();
         assert!(back.policy.allow_read_only.contains(&"ls".to_string()));
         assert!(back.policy.git_read_only.contains(&"status".to_string()));
         assert!(back.policy.deny_patterns.contains(&"mkfs".to_string()));
+    }
+
+    #[test]
+    fn v1_policy_migrates_retired_unsafe_phrases() {
+        // An upgraded install persisted the old v1 defaults: cargo check ran
+        // build scripts and npx could install packages. Migration must drop
+        // exactly those while keeping user-added entries.
+        let v1 = PolicyFile {
+            version: 1,
+            policy: Policy {
+                allow_phrases: vec![
+                    "cargo check".to_string(),
+                    "npx tsc --noEmit".to_string(),
+                    "my custom safe phrase".to_string(),
+                ],
+                ..Policy::default()
+            },
+        };
+        let migrated = migrate_policy(v1.policy, 1);
+        assert!(!migrated.allow_phrases.contains(&"cargo check".to_string()));
+        assert!(!migrated.allow_phrases.contains(&"npx tsc --noEmit".to_string()));
+        assert!(migrated.allow_phrases.contains(&"my custom safe phrase".to_string()));
+        // Already-migrated policy is untouched.
+        let v2 = migrate_policy(Policy::default(), POLICY_VERSION);
+        assert_eq!(v2.allow_phrases, Policy::default().allow_phrases);
     }
 
     #[test]

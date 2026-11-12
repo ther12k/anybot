@@ -8,7 +8,7 @@ import { BotLibraryModal } from "./components/BotLibraryModal/BotLibraryModal";
 import { AnyBotCharacter, type TaviMood } from "./components/Tavi/AnyBotCharacter";
 import { DEFAULT_BOTS } from "./data/defaultBots";
 import { AVAILABLE_MODELS } from "./services/ai/models";
-import { AgentLoop } from "./services/agent/agentLoop";
+import { AgentLoop, type RunOutcome } from "./services/agent/agentLoop";
 import { TauriBridge } from "./services/tauri/bridge";
 import {
   BotPersona,
@@ -17,7 +17,7 @@ import {
   VaultConfig,
   AIModel,
 } from "./types";
-import { ChevronRight, ArrowDown, Eye } from "lucide-react";
+import { ChevronRight, ArrowDown, Eye, Square } from "lucide-react";
 
 /** Authoritative run status: readable text first, Tavi mood follows it. */
 interface RunStatus {
@@ -25,50 +25,61 @@ interface RunStatus {
   mood: TaviMood;
 }
 
+/** Light shape validation — a JSON file that parses but has the wrong
+    shape must fall back to defaults instead of corrupting the app. */
+function loadStored<T>(key: string, isValid: (v: any) => boolean, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return isValid(parsed) ? (parsed as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+const isBotList = (v: any) =>
+  Array.isArray(v) && v.every((b) => b && typeof b.id === "string" && typeof b.name === "string");
+const isThreadList = (v: any) =>
+  Array.isArray(v) && v.every((t) => t && typeof t.id === "string" && typeof t.botId === "string");
+const isTranscriptMap = (v: any) => {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  return Object.values(v).every(
+    (arr) => Array.isArray(arr) && arr.every((e) => e && typeof e.id === "string" && typeof e.role === "string")
+  );
+};
+
 export const App: React.FC = () => {
   // State — v4: capability-flagged starter prompts; custom bots survive
   const [bots, setBots] = useState<BotPersona[]>(() => {
-    try {
-      const saved = localStorage.getItem("anybot_bots_v4");
-      if (saved) return JSON.parse(saved);
-      const older =
-        localStorage.getItem("anybot_bots_v3") ||
-        localStorage.getItem("anybot_bots_v2") ||
-        localStorage.getItem("anybot_bots");
-      if (older) {
+    const saved = loadStored<BotPersona[] | null>("anybot_bots_v4", isBotList, null);
+    if (saved) return saved;
+    const older =
+      localStorage.getItem("anybot_bots_v3") ||
+      localStorage.getItem("anybot_bots_v2") ||
+      localStorage.getItem("anybot_bots");
+    if (older) {
+      try {
         const oldBots: BotPersona[] = JSON.parse(older);
-        const customOnly = oldBots.filter((b) => b.isCustom);
-        return [...DEFAULT_BOTS, ...customOnly];
-      }
-    } catch (e) {
-      console.error("Stored agents are malformed; loading defaults.", e);
+        if (Array.isArray(oldBots)) {
+          const customOnly = oldBots.filter((b) => b?.isCustom && typeof b.id === "string");
+          return [...DEFAULT_BOTS, ...customOnly];
+        }
+      } catch {}
     }
     return DEFAULT_BOTS;
   });
 
   const [activeBot, setActiveBot] = useState<BotPersona>(bots[0]);
 
-  const [threads, setThreads] = useState<Thread[]>(() => {
-    try {
-      const saved = localStorage.getItem("anybot_threads");
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      console.error("Stored tasks are malformed; starting empty.", e);
-      return [];
-    }
-  });
+  const [threads, setThreads] = useState<Thread[]>(() =>
+    loadStored<Thread[]>("anybot_threads", isThreadList, [])
+  );
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
 
-  const [transcripts, setTranscripts] = useState<Record<string, TranscriptEntry[]>>(() => {
-    try {
-      const saved = localStorage.getItem("anybot_transcripts");
-      return saved ? JSON.parse(saved) : {};
-    } catch (e) {
-      console.error("Stored transcripts are malformed; starting empty.", e);
-      return {};
-    }
-  });
+  const [transcripts, setTranscripts] = useState<Record<string, TranscriptEntry[]>>(() =>
+    loadStored<Record<string, TranscriptEntry[]>>("anybot_transcripts", isTranscriptMap, {})
+  );
 
   const [vault, setVault] = useState<VaultConfig>({
     autoApproveSafeTools: true,
@@ -97,6 +108,8 @@ export const App: React.FC = () => {
   // Brief verified-completion celebration (Tavi success, "Completed" label)
   const [celebrate, setCelebrate] = useState(false);
   const prevGeneratingRef = useRef(false);
+  /** Honest terminal outcome of the last run — drives status and Tavi. */
+  const [lastOutcome, setLastOutcome] = useState<RunOutcome | null>(null);
 
   // Autoscroll only while the reader is near the bottom
   const [isNearBottom, setIsNearBottom] = useState(true);
@@ -116,9 +129,11 @@ export const App: React.FC = () => {
   const agentLoopRef = useRef<AgentLoop>(new AgentLoop());
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
-  // Stable mirror of transcripts for effects that must not re-fire per token
+  // Stable mirror of transcripts/threads for effects that must not re-fire per token
   const transcriptsRef = useRef(transcripts);
   transcriptsRef.current = transcripts;
+  const threadsRef = useRef(threads);
+  threadsRef.current = threads;
 
   useEffect(() => {
     async function init() {
@@ -167,19 +182,58 @@ export const App: React.FC = () => {
     return () => window.clearTimeout(t);
   }, [transcripts]);
 
-  // Completion: one short verified-success celebration, then back to idle.
+  // Completion: a SHORT celebration only for a verified "completed" outcome.
+  // Cancelled and failed runs never celebrate, whatever partial text they
+  // left behind.
   useEffect(() => {
     const was = prevGeneratingRef.current;
     prevGeneratingRef.current = isGenerating;
-    if (was && !isGenerating && !isStopping) {
-      const last = transcriptsRef.current[activeThreadId ?? ""]?.slice(-1)[0];
-      if (last?.role === "assistant" && !last.content.startsWith("**Error:**")) {
-        setCelebrate(true);
-        const t = window.setTimeout(() => setCelebrate(false), 1600);
-        return () => window.clearTimeout(t);
-      }
+    if (was && !isGenerating && !isStopping && lastOutcome === "completed") {
+      setCelebrate(true);
+      const t = window.setTimeout(() => setCelebrate(false), 1600);
+      // Reset on any dependency change too, so a navigation mid-celebration
+      // can never leave the flag stuck true.
+      return () => {
+        window.clearTimeout(t);
+        setCelebrate(false);
+      };
     }
-  }, [isGenerating, isStopping, activeThreadId]);
+  }, [isGenerating, isStopping, lastOutcome, activeThreadId]);
+
+  // Startup reconciliation: approvals live only in memory, so a pending
+  // proposal that survived a reload can never be resolved. Mark those runs
+  // interrupted instead of freezing the task behind a dead approval.
+  useEffect(() => {
+    let changed = false;
+    const next: Record<string, TranscriptEntry[]> = {};
+    for (const [threadId, list] of Object.entries(transcriptsRef.current)) {
+      next[threadId] = list.map((entry) => {
+        if (!entry.toolCalls?.some((tc) => tc.status === "pending_approval")) return entry;
+        changed = true;
+        return {
+          ...entry,
+          toolCalls: entry.toolCalls.map((tc) =>
+            tc.status === "pending_approval"
+              ? {
+                  ...tc,
+                  status: "failed" as const,
+                  result: {
+                    ...(tc.result?.diff ? { diff: tc.result.diff } : {}),
+                    error:
+                      "AnyBot restarted while this action was waiting for review — nothing ran. Ask the agent to propose it again.",
+                  },
+                }
+              : tc
+          ),
+        };
+      });
+    }
+    if (changed) {
+      setTranscripts(next);
+      console.info("Reconciled interrupted approvals from the previous session.");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Autoscroll only while the reader is near the bottom; switching tasks
   // always resets to "follow latest".
@@ -224,9 +278,6 @@ export const App: React.FC = () => {
   const hasRunningTool = currentTranscript.some((e) =>
     e.toolCalls?.some((tc) => tc.status === "running")
   );
-  const lastEntry = currentTranscript[currentTranscript.length - 1];
-  const lastTurnFailed =
-    lastEntry?.role === "assistant" && lastEntry.content.startsWith("**Error:**");
 
   const runStatus: RunStatus = (() => {
     if (isStopping) return { label: "Stopping…", mood: "working" };
@@ -236,8 +287,10 @@ export const App: React.FC = () => {
       return { label: "Working on your request", mood: "thinking" };
     }
     if (hasPendingWriteReview) return { label: "Waiting for your review", mood: "approval" };
-    if (celebrate && !lastTurnFailed) return { label: "Completed", mood: "success" };
-    if (lastTurnFailed) return { label: "Something needs attention", mood: "error" };
+    // Explicit outcomes only — partial text never masquerades as success.
+    if (celebrate && lastOutcome === "completed") return { label: "Completed", mood: "success" };
+    if (lastOutcome === "cancelled") return { label: "Stopped by you", mood: "idle" };
+    if (lastOutcome === "failed") return { label: "Something needs attention", mood: "error" };
     return { label: "Ready when you are", mood: "idle" };
   })();
 
@@ -266,6 +319,13 @@ export const App: React.FC = () => {
   };
 
   const handleDeleteThread = (threadId: string) => {
+    // Deleting the ACTIVE task while it runs must stop the run — otherwise
+    // its callbacks would keep writing (or resume after approval) with no
+    // discoverable owner.
+    if (threadId === activeThreadId && agentLoopRef.current.isBusy()) {
+      agentLoopRef.current.abort();
+      setIsStopping(true);
+    }
     const thread = threads.find((t) => t.id === threadId);
     setThreads(threads.filter((t) => t.id !== threadId));
     const nextTranscripts = { ...transcripts };
@@ -313,6 +373,21 @@ export const App: React.FC = () => {
     const modelId = thread.modelId ?? threadBot?.defaultModel;
     const model = AVAILABLE_MODELS.find((m) => m.id === modelId);
     if (model) setSelectedModel(model);
+  };
+
+  /**
+   * Single source of truth for execution context: the model in the selector
+   * IS the model the next message runs on. Picking one updates the active
+   * task's context explicitly — the visible choice can never silently
+   * diverge from what receives the conversation.
+   */
+  const handleSelectModel = (model: AIModel) => {
+    setSelectedModel(model);
+    if (activeThreadId) {
+      setThreads((prev) =>
+        prev.map((t) => (t.id === activeThreadId ? { ...t, modelId: model.id } : t))
+      );
+    }
   };
 
   /** A task with history keeps its identity: picking another agent forks a
@@ -417,20 +492,20 @@ export const App: React.FC = () => {
     const threadHistory = [...(transcripts[currentThreadId] || []), userEntry];
     setTranscripts({ ...transcripts, [currentThreadId]: threadHistory });
 
-    // The THREAD owns this run's context, not the global selection — history
-    // is never continued under a different agent's instructions.
+    // The THREAD owns the agent identity; the SELECTOR owns the model (and
+    // keeps thread.modelId in sync). What you see above the composer is
+    // exactly what receives this message.
     const thread = threads.find((t) => t.id === currentThreadId);
     const threadBot =
       bots.find((b) => b.id === (thread?.botId ?? activeBot.id)) ?? activeBot;
-    const threadModel =
-      AVAILABLE_MODELS.find((m) => m.id === (thread?.modelId ?? threadBot.defaultModel)) ??
-      selectedModel;
+    const threadModel = selectedModel;
 
     setIsGenerating(true);
     setIsStopping(false);
+    setLastOutcome(null);
 
     try {
-      await agentLoopRef.current.runTurn(
+      const outcome = await agentLoopRef.current.runTurn(
         currentThreadId,
         threadHistory,
         threadBot,
@@ -438,6 +513,9 @@ export const App: React.FC = () => {
         vault,
         (updatedEntry) => {
           setTranscripts((prev) => {
+            // The task may have been deleted mid-run; never resurrect a
+            // transcript for a thread that no longer exists.
+            if (!threadsRef.current.some((t) => t.id === currentThreadId)) return prev;
             const list = prev[currentThreadId!] || [];
             const idx = list.findIndex((e) => e.id === updatedEntry.id);
             if (idx !== -1) {
@@ -450,6 +528,7 @@ export const App: React.FC = () => {
         },
         (newEntry) => {
           setTranscripts((prev) => {
+            if (!threadsRef.current.some((t) => t.id === currentThreadId)) return prev;
             const list = prev[currentThreadId!] || [];
             return { ...prev, [currentThreadId!]: [...list, newEntry] };
           });
@@ -458,6 +537,7 @@ export const App: React.FC = () => {
           approvalResolversRef.current.set(toolCall.id, resolve);
         }
       );
+      setLastOutcome(outcome);
     } finally {
       // Settle before accepting new input: Stop keeps control until here.
       setIsGenerating(false);
@@ -487,10 +567,15 @@ export const App: React.FC = () => {
       if (tc && tc.name === "execute_shell" && tc.arguments.command) {
         try {
           const command = tc.arguments.command as string;
+          // Must mirror the agent loop's resolution: the run recorded the
+          // resolved cwd on the tool call, so scope the grant to exactly
+          // what was checked — otherwise the grant never matches again.
           const cwd = tc.arguments.cwd || systemInfo?.cwd || undefined;
           const grants = await TauriBridge.loadStandingGrants();
           const already = grants.some((g) =>
-            typeof g === "string" ? g === command : g.command === command
+            typeof g === "string"
+              ? g === command
+              : g.command === command && (g.cwd ?? undefined) === cwd
           );
           if (!already) {
             // New grants are scoped to the workspace they were approved in.
@@ -712,13 +797,27 @@ export const App: React.FC = () => {
                   </p>
                 </div>
               </div>
-              <button
-                onClick={jumpToLatest}
-                className="px-3 py-1.5 rounded-lg border border-stroke bg-elevated hover:bg-elevatedHover text-xs font-medium text-secondary hover:text-primary transition-colors flex items-center gap-1.5 shrink-0"
-              >
-                <Eye className="w-3.5 h-3.5" aria-hidden="true" />
-                Review change
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {/* Stop stays reachable while the composer is hidden —
+                    declining one change is not the only way out. */}
+                {!isStopping && (
+                  <button
+                    onClick={handleStop}
+                    className="px-3 py-1.5 rounded-lg border border-stroke bg-elevated hover:bg-elevatedHover text-xs font-medium text-secondary hover:text-primary transition-colors flex items-center gap-1.5"
+                    title="Stop the whole task — pending reviews count as declined"
+                  >
+                    <Square className="w-3 h-3 fill-current" aria-hidden="true" />
+                    Stop task
+                  </button>
+                )}
+                <button
+                  onClick={jumpToLatest}
+                  className="px-3 py-1.5 rounded-lg border border-stroke bg-elevated hover:bg-elevatedHover text-xs font-medium text-secondary hover:text-primary transition-colors flex items-center gap-1.5"
+                >
+                  <Eye className="w-3.5 h-3.5" aria-hidden="true" />
+                  Review change
+                </button>
+              </div>
             </div>
           </div>
         ) : (
@@ -728,7 +827,7 @@ export const App: React.FC = () => {
             isGenerating={isGenerating}
             isStopping={isStopping}
             selectedModel={selectedModel}
-            onSelectModel={setSelectedModel}
+            onSelectModel={handleSelectModel}
           />
         )}
 
