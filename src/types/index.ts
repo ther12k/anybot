@@ -63,6 +63,20 @@ export interface BotPromptSuggestion {
   toolsRequired?: boolean;
 }
 
+/** A repeatable multi-step task chain, run step-by-step with one click. */
+export interface BotWorkflow {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  /** Ordered prompts; each step waits for the previous run to settle. */
+  steps: string[];
+  /** True when any step needs shell/file tools. */
+  toolsRequired?: boolean;
+  category?: Exclude<BotCategory, "all">;
+  isCustom?: boolean;
+}
+
 export interface BotPersona {
   id: string;
   name: string;

@@ -7,6 +7,7 @@ import { SettingsModal } from "./components/SettingsModal/SettingsModal";
 import { BotLibraryModal } from "./components/BotLibraryModal/BotLibraryModal";
 import { AnyBotCharacter, type TaviMood } from "./components/Tavi/AnyBotCharacter";
 import { DEFAULT_BOTS } from "./data/defaultBots";
+import { DEFAULT_WORKFLOWS } from "./data/defaultWorkflows";
 import { AVAILABLE_MODELS } from "./services/ai/models";
 import { AgentLoop, type RunOutcome } from "./services/agent/agentLoop";
 import { TauriBridge } from "./services/tauri/bridge";
@@ -16,6 +17,7 @@ import {
   TranscriptEntry,
   VaultConfig,
   AIModel,
+  BotWorkflow,
 } from "./types";
 import { ChevronRight, ArrowDown, Eye, Square } from "lucide-react";
 
@@ -47,6 +49,9 @@ const isTranscriptMap = (v: any) => {
     (arr) => Array.isArray(arr) && arr.every((e) => e && typeof e.id === "string" && typeof e.role === "string")
   );
 };
+const isWorkflowList = (v: any) =>
+  Array.isArray(v) &&
+  v.every((w) => w && typeof w.id === "string" && typeof w.name === "string" && Array.isArray(w.steps));
 
 export const App: React.FC = () => {
   // State — v4: capability-flagged starter prompts; custom bots survive
@@ -80,6 +85,17 @@ export const App: React.FC = () => {
   const [transcripts, setTranscripts] = useState<Record<string, TranscriptEntry[]>>(() =>
     loadStored<Record<string, TranscriptEntry[]>>("anybot_transcripts", isTranscriptMap, {})
   );
+
+  // One-click multi-step workflows (Grok Bot-style task chains)
+  const [workflows, setWorkflows] = useState<BotWorkflow[]>(() =>
+    loadStored<BotWorkflow[]>("anybot_workflows_v1", isWorkflowList, DEFAULT_WORKFLOWS)
+  );
+  const [workflowProgress, setWorkflowProgress] = useState<{
+    name: string;
+    step: number;
+    total: number;
+  } | null>(null);
+  const stopWorkflowRef = useRef(false);
 
   const [vault, setVault] = useState<VaultConfig>({
     autoApproveSafeTools: true,
@@ -164,6 +180,10 @@ export const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem("anybot_bots_v4", JSON.stringify(bots));
   }, [bots]);
+
+  useEffect(() => {
+    localStorage.setItem("anybot_workflows_v1", JSON.stringify(workflows));
+  }, [workflows]);
 
   useEffect(() => {
     localStorage.setItem("anybot_threads", JSON.stringify(threads));
@@ -283,6 +303,8 @@ export const App: React.FC = () => {
     if (isStopping) return { label: "Stopping…", mood: "working" };
     if (isGenerating) {
       if (hasPendingWriteReview) return { label: "Waiting for your review", mood: "approval" };
+      if (workflowProgress)
+        return { label: `${workflowProgress.name} · Step ${workflowProgress.step}/${workflowProgress.total}`, mood: "working" };
       if (hasRunningTool) return { label: "Working on your request", mood: "working" };
       return { label: "Working on your request", mood: "thinking" };
     }
@@ -449,10 +471,10 @@ export const App: React.FC = () => {
     setIsBotDrawerOpen(true);
   };
 
-  const handleSendMessage = async (text: string) => {
+  const handleSendMessage = async (text: string): Promise<RunOutcome | null> => {
     // Concurrency policy: one run at a time. Sending during an active or
     // settling run is refused instead of sharing its controller.
-    if (agentLoopRef.current.isBusy()) return;
+    if (agentLoopRef.current.isBusy()) return null;
 
     let currentThreadId = activeThreadId;
 
@@ -538,6 +560,7 @@ export const App: React.FC = () => {
         }
       );
       setLastOutcome(outcome);
+      return outcome;
     } finally {
       // Settle before accepting new input: Stop keeps control until here.
       setIsGenerating(false);
@@ -546,11 +569,35 @@ export const App: React.FC = () => {
   };
 
   const handleStop = () => {
+    // A running workflow chain must not continue with its next step.
+    stopWorkflowRef.current = true;
     if (agentLoopRef.current.abort()) {
       // The run stays busy until it settles; the composer flips back to Send
       // only after the awaited runTurn resolves.
       setIsStopping(true);
     }
+  };
+
+  /**
+   * Run a one-click workflow: each step is a full agent turn that must
+   * settle before the next starts. Stop cancels the current step AND the
+   * remaining chain. Steps behave exactly like hand-typed messages — tools,
+   * approvals, and reviewed diffs all apply.
+   */
+  const handleRunWorkflow = async (wf: BotWorkflow) => {
+    if (agentLoopRef.current.isBusy() || workflowProgress) return;
+    if (wf.toolsRequired && !selectedModel.supportsTools) return;
+
+    stopWorkflowRef.current = false;
+    for (let i = 0; i < wf.steps.length; i++) {
+      if (stopWorkflowRef.current) break;
+      setWorkflowProgress({ name: wf.name, step: i + 1, total: wf.steps.length });
+      const outcome = await handleSendMessage(wf.steps[i]);
+      // A refused send (busy) or failed step stops the chain honestly;
+      // "cancelled" is handled by stopWorkflowRef on the next iteration.
+      if (outcome === null || outcome === "failed") break;
+    }
+    setWorkflowProgress(null);
   };
 
   const handleApproveTool = (toolCallId: string) => {
@@ -755,11 +802,69 @@ export const App: React.FC = () => {
 
                 <button
                   onClick={() => setIsLibraryModalOpen(true)}
-                  className="mt-4 text-xs text-accent hover:underline flex items-center gap-1 font-medium"
+                  className="mt-3 text-xs text-accent hover:underline flex items-center gap-1 font-medium"
                 >
                   <span>Browse all {bots.length} agents in library</span>
                   <ChevronRight className="w-3.5 h-3.5" />
                 </button>
+
+                {/* One-click workflows — multi-step task chains, run like a
+                    real user would, step by step with honest progress. */}
+                <div className="w-full mt-5 pt-4 border-t border-stroke">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xxs font-semibold text-tertiary uppercase tracking-wide">
+                      Workflows
+                    </span>
+                    <span className="text-xxs text-quaternary font-mono">
+                      {workflows.length} available
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 gap-1.5 w-full">
+                    {workflows.slice(0, 4).map((wf) => {
+                      const needsTools = !!wf.toolsRequired && !toolCapable;
+                      const busy = isGenerating || !!workflowProgress;
+                      return (
+                        <button
+                          key={wf.id}
+                          onClick={() => !needsTools && !busy && handleRunWorkflow(wf)}
+                          disabled={needsTools || busy}
+                          title={
+                            needsTools
+                              ? "This workflow needs a tool-capable model — pick one above the message box."
+                              : wf.description
+                          }
+                          className={`px-3 py-2 rounded-xl border border-stroke bg-elevated text-left text-xs transition-colors flex items-center gap-2.5 ${
+                            needsTools || busy
+                              ? "opacity-50 cursor-not-allowed"
+                              : "hover:bg-elevatedHover hover:border-strokeStrong"
+                          }`}
+                        >
+                          <span className="text-base select-none shrink-0" aria-hidden="true">
+                            {wf.icon}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block font-medium text-primary truncate">
+                              {wf.name}
+                              {wf.toolsRequired && !toolCapable && (
+                                <span className="ml-1.5 text-xxs px-1.5 py-px rounded bg-hover text-tertiary font-mono align-middle">
+                                  needs tools
+                                </span>
+                              )}
+                            </span>
+                            <span className="block text-xxs text-quaternary truncate">
+                              {wf.steps.length} steps · {wf.description}
+                            </span>
+                          </span>
+                          {workflowProgress?.name === wf.name && (
+                            <span className="text-xxs font-mono text-accent shrink-0">
+                              {workflowProgress.step}/{workflowProgress.total}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             </div>
           ) : (
