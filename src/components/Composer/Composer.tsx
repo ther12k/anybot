@@ -7,6 +7,8 @@ interface ComposerProps {
   onSendMessage: (content: string) => void;
   onStop: () => void;
   isGenerating: boolean;
+  /** True after Stop was clicked but before the run has settled. */
+  isStopping?: boolean;
   selectedModel: AIModel;
   onSelectModel: (model: AIModel) => void;
 }
@@ -15,6 +17,7 @@ export const Composer: React.FC<ComposerProps> = ({
   onSendMessage,
   onStop,
   isGenerating,
+  isStopping = false,
   selectedModel,
   onSelectModel,
 }) => {
@@ -112,6 +115,14 @@ export const Composer: React.FC<ComposerProps> = ({
                       thinking
                     </span>
                   )}
+                  {!model.supportsTools && (
+                    <span
+                      className="text-xxs px-1.5 py-px rounded bg-hover text-tertiary shrink-0"
+                      title="This model cannot use shell/file tools — file and command tasks are disabled"
+                    >
+                      chat-only
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
@@ -153,13 +164,21 @@ export const Composer: React.FC<ComposerProps> = ({
               </button>
             </div>
 
-            {/* Send / Stop — black circular button, Grok style */}
+            {/* Send / Stop — ink circular button; honest Stopping state */}
             <div className="flex items-center gap-2">
-              {isGenerating ? (
+              {isStopping ? (
+                <span
+                  className="w-8 h-8 rounded-full bg-bubbleUser text-white flex items-center justify-center opacity-70"
+                  role="status"
+                  title="Stopping — waiting for the running task to settle"
+                >
+                  <Square className="w-3 h-3 fill-current" />
+                </span>
+              ) : isGenerating ? (
                 <button
                   type="button"
                   onClick={onStop}
-                  className="w-8 h-8 rounded-full bg-bubbleUser hover:bg-[#333] text-white transition-colors flex items-center justify-center"
+                  className="w-8 h-8 rounded-full bg-bubbleUser hover:bg-[#3d3733] text-white transition-colors flex items-center justify-center"
                   title="Stop generating"
                 >
                   <Square className="w-3 h-3 fill-current" />
@@ -169,7 +188,7 @@ export const Composer: React.FC<ComposerProps> = ({
                   type="button"
                   onClick={handleSend}
                   disabled={!input.trim()}
-                  className="w-8 h-8 rounded-full bg-bubbleUser text-white transition-all flex items-center justify-center disabled:bg-hover disabled:text-quaternary hover:bg-[#333] enabled:shadow-sm"
+                  className="w-8 h-8 rounded-full bg-bubbleUser text-white transition-all flex items-center justify-center disabled:bg-hover disabled:text-quaternary hover:bg-[#3d3733] enabled:shadow-sm"
                   title="Send (Enter)"
                 >
                   <ArrowUp className="w-4 h-4" />

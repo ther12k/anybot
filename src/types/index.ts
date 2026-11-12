@@ -32,7 +32,8 @@ export interface ToolCallItem {
   result?: {
     output?: string;
     error?: string;
-    diff?: { before: string; after: string; path: string };
+    /** Pre-write proposal: prepared BEFORE approval, not after the write. */
+    diff?: { before: string; after: string; path: string; existed?: boolean };
     executionTimeMs?: number;
   };
 }
@@ -56,6 +57,8 @@ export interface BotPromptSuggestion {
   subtitle: string;
   prompt: string;
   icon?: string;
+  /** True when the task needs shell/file tools; hidden on chat-only models. */
+  toolsRequired?: boolean;
 }
 
 export interface BotPersona {
@@ -77,6 +80,8 @@ export interface BotPersona {
 export interface Thread {
   id: string;
   botId: string;
+  /** Model this conversation runs on; restored when the thread is opened. */
+  modelId?: string;
   title: string;
   createdAt: number;
   updatedAt: number;

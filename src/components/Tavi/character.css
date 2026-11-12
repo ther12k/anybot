@@ -1,0 +1,60 @@
+/* Tavi / AnyBot. Motion is decorative; pair with authoritative status text. */
+.anybot-tavi { display:inline-block; overflow:visible; vertical-align:middle; flex:none; }
+.anybot-tavi .tavi-body { transform-origin:0 0; }
+.anybot-tavi .tavi-leaf { transform-origin:0 0; }
+.anybot-tavi .tavi-left-arm { transform-origin:0 0; }
+.anybot-tavi .tavi-right-arm { transform-origin:0 0; }
+.anybot-tavi .tavi-eyes { transform-origin:0 0; }
+.anybot-tavi .tavi-eyes-sleep,.anybot-tavi .tavi-eyes-happy,.anybot-tavi .tavi-brows,.anybot-tavi .tavi-mouth-worried,.anybot-tavi .tavi-thoughts,.anybot-tavi .tavi-sparkles,.anybot-tavi .tavi-listening-ring,.anybot-tavi .tavi-sleep-dot { opacity:0; }
+.anybot-tavi[data-mood="idle"] .tavi-body { animation:tavi-breathe 5.4s ease-in-out infinite; }
+.anybot-tavi[data-mood="idle"] .tavi-eyes-open { animation:tavi-blink 6.1s infinite; transform-origin:0 0; }
+.anybot-tavi[data-mood="listening"] .tavi-body { transform:matrix(0.99619,-0.08716,0.08716,0.99619,-11.37445,7.48237); }
+.anybot-tavi[data-mood="listening"] .tavi-leaf { transform:matrix(0.97815,0.20791,-0.20791,0.97815,11.31150,-19.62175); }
+.anybot-tavi[data-mood="listening"] .tavi-eyes { transform:translate(-3px,-2px); }
+.anybot-tavi[data-mood="listening"] .tavi-listening-ring { opacity:1; animation:tavi-ring 2.4s ease-in-out infinite; }
+.anybot-tavi[data-mood="thinking"] .tavi-body { animation:tavi-consider 4s ease-in-out infinite; }
+.anybot-tavi[data-mood="thinking"] .tavi-eyes { transform:translate(4px,-2px); }
+.anybot-tavi[data-mood="thinking"] .tavi-thoughts { opacity:1; }
+.anybot-tavi[data-mood="thinking"] .tavi-thoughts circle { animation:tavi-think 1.4s ease-in-out infinite; }
+.anybot-tavi[data-mood="thinking"] .tavi-thoughts circle:nth-child(2) { animation-delay:.18s; }
+.anybot-tavi[data-mood="thinking"] .tavi-thoughts circle:nth-child(3) { animation-delay:.36s; }
+.anybot-tavi[data-mood="working"] .tavi-eyes { transform:translateY(3px); }
+.anybot-tavi[data-mood="working"] .tavi-left-arm { transform:translateY(4px); animation:tavi-tap .9s ease-in-out infinite; }
+.anybot-tavi[data-mood="working"] .tavi-right-arm { transform:translateY(3px); animation:tavi-tap .9s ease-in-out -.45s infinite; }
+.anybot-tavi[data-mood="working"] .tavi-leaf { animation:tavi-leaf .9s ease-in-out infinite; }
+.anybot-tavi[data-mood="approval"] .tavi-right-arm { transform:matrix(0.37461,-0.92718,0.92718,0.37461,-5.91958,167.22387); }
+.anybot-tavi[data-mood="approval"] .tavi-brows { opacity:1; }
+.anybot-tavi[data-mood="approval"] .tavi-body { transform:translateY(-1px); }
+.anybot-tavi[data-mood="success"] .tavi-eyes-open,.anybot-tavi[data-mood="sleep"] .tavi-eyes-open { opacity:0; }
+.anybot-tavi[data-mood="success"] .tavi-eyes-happy { opacity:1; }
+.anybot-tavi[data-mood="success"] .tavi-sparkles { opacity:1; animation:tavi-pop .65s ease-out 1; }
+.anybot-tavi[data-mood="success"] .tavi-body { animation:tavi-celebrate .8s ease-out 1; }
+.anybot-tavi[data-mood="success"] .tavi-left-arm { transform:matrix(0.81915,0.57358,-0.57358,0.81915,57.13507,-7.20929); }
+.anybot-tavi[data-mood="success"] .tavi-right-arm { transform:matrix(0.81915,-0.57358,0.57358,0.81915,-28.59212,85.31737); }
+.anybot-tavi[data-mood="error"] .tavi-mouth,.anybot-tavi[data-mood="offline"] .tavi-mouth { opacity:0; }
+.anybot-tavi[data-mood="error"] .tavi-mouth-worried,.anybot-tavi[data-mood="offline"] .tavi-mouth-worried { opacity:1; }
+.anybot-tavi[data-mood="error"] .tavi-brows { opacity:1; transform:translateY(2px); }
+.anybot-tavi[data-mood="error"] .tavi-body { transform:matrix(0.99863,-0.05234,0.05234,0.99863,-6.90338,4.37052); }
+.anybot-tavi[data-mood="sleep"] .tavi-eyes-sleep,.anybot-tavi[data-mood="sleep"] .tavi-sleep-dot { opacity:1; }
+.anybot-tavi[data-mood="sleep"] .tavi-body { transform:matrix(1,0,0,.95,0,10.7); animation:tavi-sleep 5s ease-in-out infinite; }
+.anybot-tavi[data-mood="sleep"] .tavi-leaf { transform:matrix(0.95630,-0.29237,0.29237,0.95630,-8.53853,30.86739); }
+.anybot-tavi[data-mood="sleep"] .tavi-mouth { transform:matrix(.94,0,0,1,7.8,0); }
+.anybot-tavi[data-mood="wave"] .tavi-right-arm { transform:matrix(0.82904,-0.55919,0.55919,0.82904,-28.52252,82.70703); animation:tavi-wave 1.4s ease-in-out 1 both; }
+.anybot-tavi[data-mood="wave"] .tavi-body { transform:none; animation:none; }
+.anybot-tavi[data-mood="wave"] .tavi-eyes,.anybot-tavi[data-mood="wave"] .tavi-eyes-open { transform:none; opacity:1; animation:none; }
+.anybot-tavi[data-mood="wave"] .tavi-mouth { transform:none; opacity:1; }
+.anybot-tavi[data-mood="offline"] { filter:saturate(.34); }
+.anybot-tavi[data-mood="offline"] .tavi-leaf { transform:matrix(0.94552,-0.32557,0.32557,0.94552,-8.93134,34.62843); }
+.anybot-tavi[data-mood="offline"] .tavi-eyes { transform:translateY(3px); }
+@keyframes tavi-breathe { 0%,100%{transform:translateY(0) scale(1,1)} 50%{transform:matrix(1.015,0,0,.99,-1.2,-.66)} }
+@keyframes tavi-blink { 0%,42%,46%,83%,87%,100%{transform:scaleY(1)} 44%,85%{transform:matrix(1,0,0,.08,0,76.36)} }
+@keyframes tavi-ring { 0%,100%{opacity:.35} 50%{opacity:.85} }
+@keyframes tavi-consider { 0%,100%{transform:matrix(0.99939,0.03490,-0.03490,0.99939,4.72527,-2.71033)} 50%{transform:matrix(0.99863,-0.05234,0.05234,0.99863,-6.90338,4.37052)} }
+@keyframes tavi-think { 0%,100%{opacity:.3} 45%{opacity:1} }
+@keyframes tavi-tap { 0%,100%{transform:translateY(0)} 50%{transform:translateY(5px)} }
+@keyframes tavi-leaf { 0%,100%{transform:matrix(0.99863,-0.05234,0.05234,0.99863,-2.16711,5.24156)} 50%{transform:matrix(0.99619,0.08716,-0.08716,0.99619,4.21158,-8.46099)} }
+@keyframes tavi-pop { 0%{opacity:0} 100%{opacity:1} }
+@keyframes tavi-celebrate { 0%,100%{transform:translateY(0)} 30%{transform:translateY(-8px) matrix(0.99619,-0.08716,0.08716,0.99619,-11.37445,7.48237)} 65%{transform:translateY(-3px) matrix(0.99863,0.05234,-0.05234,0.99863,7.12266,-4.00323)} }
+@keyframes tavi-sleep { 0%,100%{transform:matrix(1,0,0,.95,0,10.7)} 50%{transform:matrix(1.02,0,0,.96,-1.6,8.36)} }
+@keyframes tavi-wave { 0%,100%{transform:matrix(1,0,0,1,0,0)} 18%{transform:matrix(0.82904,-0.55919,0.55919,0.82904,-28.52252,82.70703)} 35%{transform:matrix(0.69466,-0.71934,0.71934,0.69466,-26.35557,113.91018)} 52%,86%{transform:matrix(0.88295,-0.46947,0.46947,0.88295,-27.15016,67.10667)} 70%{transform:matrix(0.73135,-0.68200,0.68200,0.73135,-27.50965,106.16268)} }
+@media (prefers-reduced-motion: reduce) { .anybot-tavi,.anybot-tavi * { animation:none !important; transition:none !important; } }

@@ -5,6 +5,7 @@ import { Composer } from "./components/Composer/Composer";
 import { BotDrawer } from "./components/BotDrawer/BotDrawer";
 import { SettingsModal } from "./components/SettingsModal/SettingsModal";
 import { BotLibraryModal } from "./components/BotLibraryModal/BotLibraryModal";
+import { AnyBotCharacter, type TaviMood } from "./components/Tavi/AnyBotCharacter";
 import { DEFAULT_BOTS } from "./data/defaultBots";
 import { AVAILABLE_MODELS } from "./services/ai/models";
 import { AgentLoop } from "./services/agent/agentLoop";
@@ -16,26 +17,31 @@ import {
   VaultConfig,
   AIModel,
 } from "./types";
-import { Sparkles, Terminal, FileCode, ShieldCheck, ChevronRight } from "lucide-react";
+import { ChevronRight, ArrowDown, Eye } from "lucide-react";
+
+/** Authoritative run status: readable text first, Tavi mood follows it. */
+interface RunStatus {
+  label: string;
+  mood: TaviMood;
+}
 
 export const App: React.FC = () => {
-  // State — v3 migration: load new rich popular bots, preserving custom bots
+  // State — v4: capability-flagged starter prompts; custom bots survive
   const [bots, setBots] = useState<BotPersona[]>(() => {
-    const saved = localStorage.getItem("anybot_bots_v3");
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {}
-    }
-    const oldSaved =
-      localStorage.getItem("anybot_bots_v2") ||
-      localStorage.getItem("anybot_bots");
-    if (oldSaved) {
-      try {
-        const oldBots: BotPersona[] = JSON.parse(oldSaved);
+    try {
+      const saved = localStorage.getItem("anybot_bots_v4");
+      if (saved) return JSON.parse(saved);
+      const older =
+        localStorage.getItem("anybot_bots_v3") ||
+        localStorage.getItem("anybot_bots_v2") ||
+        localStorage.getItem("anybot_bots");
+      if (older) {
+        const oldBots: BotPersona[] = JSON.parse(older);
         const customOnly = oldBots.filter((b) => b.isCustom);
         return [...DEFAULT_BOTS, ...customOnly];
-      } catch {}
+      }
+    } catch (e) {
+      console.error("Stored agents are malformed; loading defaults.", e);
     }
     return DEFAULT_BOTS;
   });
@@ -43,15 +49,25 @@ export const App: React.FC = () => {
   const [activeBot, setActiveBot] = useState<BotPersona>(bots[0]);
 
   const [threads, setThreads] = useState<Thread[]>(() => {
-    const saved = localStorage.getItem("anybot_threads");
-    return saved ? JSON.parse(saved) : [];
+    try {
+      const saved = localStorage.getItem("anybot_threads");
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      console.error("Stored tasks are malformed; starting empty.", e);
+      return [];
+    }
   });
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
 
   const [transcripts, setTranscripts] = useState<Record<string, TranscriptEntry[]>>(() => {
-    const saved = localStorage.getItem("anybot_transcripts");
-    return saved ? JSON.parse(saved) : {};
+    try {
+      const saved = localStorage.getItem("anybot_transcripts");
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) {
+      console.error("Stored transcripts are malformed; starting empty.", e);
+      return {};
+    }
   });
 
   const [vault, setVault] = useState<VaultConfig>({
@@ -72,9 +88,19 @@ export const App: React.FC = () => {
   } | null>(null);
 
   const [isGenerating, setIsGenerating] = useState(false);
+  // Honest stop: stays true from clicking Stop until the run has settled.
+  const [isStopping, setIsStopping] = useState(false);
   const [isBotDrawerOpen, setIsBotDrawerOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [isLibraryModalOpen, setIsLibraryModalOpen] = useState(false);
+
+  // Brief verified-completion celebration (Tavi success, "Completed" label)
+  const [celebrate, setCelebrate] = useState(false);
+  const prevGeneratingRef = useRef(false);
+
+  // Autoscroll only while the reader is near the bottom
+  const [isNearBottom, setIsNearBottom] = useState(true);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // Undo-able chat deletion: keep the removed thread for a grace period
   const [deletedChat, setDeletedChat] = useState<{
@@ -89,6 +115,10 @@ export const App: React.FC = () => {
 
   const agentLoopRef = useRef<AgentLoop>(new AgentLoop());
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+
+  // Stable mirror of transcripts for effects that must not re-fire per token
+  const transcriptsRef = useRef(transcripts);
+  transcriptsRef.current = transcripts;
 
   useEffect(() => {
     async function init() {
@@ -117,31 +147,115 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("anybot_bots_v3", JSON.stringify(bots));
+    localStorage.setItem("anybot_bots_v4", JSON.stringify(bots));
   }, [bots]);
 
   useEffect(() => {
     localStorage.setItem("anybot_threads", JSON.stringify(threads));
   }, [threads]);
 
+  // Streaming writes a lot: debounce so each token doesn't serialize the
+  // whole history synchronously.
   useEffect(() => {
-    localStorage.setItem("anybot_transcripts", JSON.stringify(transcripts));
+    const t = window.setTimeout(() => {
+      try {
+        localStorage.setItem("anybot_transcripts", JSON.stringify(transcripts));
+      } catch (e) {
+        console.error("Failed to persist transcript:", e);
+      }
+    }, 400);
+    return () => window.clearTimeout(t);
   }, [transcripts]);
 
+  // Completion: one short verified-success celebration, then back to idle.
   useEffect(() => {
+    const was = prevGeneratingRef.current;
+    prevGeneratingRef.current = isGenerating;
+    if (was && !isGenerating && !isStopping) {
+      const last = transcriptsRef.current[activeThreadId ?? ""]?.slice(-1)[0];
+      if (last?.role === "assistant" && !last.content.startsWith("**Error:**")) {
+        setCelebrate(true);
+        const t = window.setTimeout(() => setCelebrate(false), 1600);
+        return () => window.clearTimeout(t);
+      }
+    }
+  }, [isGenerating, isStopping, activeThreadId]);
+
+  // Autoscroll only while the reader is near the bottom; switching tasks
+  // always resets to "follow latest".
+  useEffect(() => {
+    setIsNearBottom(true);
+  }, [activeThreadId]);
+
+  useEffect(() => {
+    if (!isNearBottom) return;
     const prefersMotion = window.matchMedia(
       "(prefers-reduced-motion: no-preference)"
     ).matches;
     transcriptEndRef.current?.scrollIntoView({
       behavior: prefersMotion ? "smooth" : "auto",
     });
-  }, [transcripts, activeThreadId]);
+  }, [transcripts, activeThreadId, isNearBottom]);
 
-  // Handlers
+  const handleTranscriptScroll = () => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+    setIsNearBottom(nearBottom);
+  };
+
+  const jumpToLatest = () => {
+    setIsNearBottom(true);
+    const prefersMotion = window.matchMedia(
+      "(prefers-reduced-motion: no-preference)"
+    ).matches;
+    transcriptEndRef.current?.scrollIntoView({
+      behavior: prefersMotion ? "smooth" : "auto",
+    });
+  };
+
+  // ---- Derived run context -------------------------------------------------
+  const currentTranscript = activeThreadId ? transcripts[activeThreadId] || [] : [];
+  const activeThread = threads.find((t) => t.id === activeThreadId) ?? null;
+
+  const hasPendingWriteReview = currentTranscript.some((e) =>
+    e.toolCalls?.some((tc) => tc.name === "write_file" && tc.status === "pending_approval")
+  );
+  const hasRunningTool = currentTranscript.some((e) =>
+    e.toolCalls?.some((tc) => tc.status === "running")
+  );
+  const lastEntry = currentTranscript[currentTranscript.length - 1];
+  const lastTurnFailed =
+    lastEntry?.role === "assistant" && lastEntry.content.startsWith("**Error:**");
+
+  const runStatus: RunStatus = (() => {
+    if (isStopping) return { label: "Stopping…", mood: "working" };
+    if (isGenerating) {
+      if (hasPendingWriteReview) return { label: "Waiting for your review", mood: "approval" };
+      if (hasRunningTool) return { label: "Working on your request", mood: "working" };
+      return { label: "Working on your request", mood: "thinking" };
+    }
+    if (hasPendingWriteReview) return { label: "Waiting for your review", mood: "approval" };
+    if (celebrate && !lastTurnFailed) return { label: "Completed", mood: "success" };
+    if (lastTurnFailed) return { label: "Something needs attention", mood: "error" };
+    return { label: "Ready when you are", mood: "idle" };
+  })();
+
+  // Welcome-screen Tavi: one wave on arrival, then settle.
+  const [welcomeMood, setWelcomeMood] = useState<TaviMood>("wave");
+  useEffect(() => {
+    setWelcomeMood("wave");
+    const t = window.setTimeout(() => setWelcomeMood("idle"), 1500);
+    return () => window.clearTimeout(t);
+  }, [activeThreadId]);
+
+  // ---- Handlers ------------------------------------------------------------
+
   const handleNewThread = () => {
     const newThread: Thread = {
       id: `thread_${Date.now()}`,
       botId: activeBot.id,
+      modelId: selectedModel.id,
       title: "New chat",
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -189,9 +303,49 @@ export const App: React.FC = () => {
     );
   };
 
+  /** Opening a task restores ITS agent and model — history keeps its identity. */
+  const handleSelectThread = (threadId: string) => {
+    setActiveThreadId(threadId);
+    const thread = threads.find((t) => t.id === threadId);
+    if (!thread) return;
+    const threadBot = bots.find((b) => b.id === thread.botId);
+    if (threadBot) setActiveBot(threadBot);
+    const modelId = thread.modelId ?? threadBot?.defaultModel;
+    const model = AVAILABLE_MODELS.find((m) => m.id === modelId);
+    if (model) setSelectedModel(model);
+  };
+
+  /** A task with history keeps its identity: picking another agent forks a
+      NEW task instead of silently re-instructing the old conversation. */
   const handleSelectBot = (bot: BotPersona) => {
-    setActiveBot(bot);
     const model = AVAILABLE_MODELS.find((m) => m.id === bot.defaultModel);
+    const currentThread = threads.find((t) => t.id === activeThreadId);
+    const hasHistory = !!currentThread && (transcripts[currentThread.id]?.length ?? 0) > 0;
+
+    if (currentThread && hasHistory && currentThread.botId !== bot.id) {
+      const fork: Thread = {
+        id: `thread_${Date.now()}`,
+        botId: bot.id,
+        modelId: model?.id ?? selectedModel.id,
+        title: "New chat",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      setThreads((prev) => [fork, ...prev]);
+      setActiveThreadId(fork.id);
+      setTranscripts((prev) => ({ ...prev, [fork.id]: [] }));
+    } else if (currentThread && !hasHistory) {
+      // Empty task: retarget it to the chosen agent.
+      setThreads((prev) =>
+        prev.map((t) =>
+          t.id === currentThread.id
+            ? { ...t, botId: bot.id, modelId: model?.id ?? t.modelId }
+            : t
+        )
+      );
+    }
+
+    setActiveBot(bot);
     if (model) setSelectedModel(model);
   };
 
@@ -216,17 +370,22 @@ export const App: React.FC = () => {
       systemPrompt: `You are a custom AI assistant with native access to local tools and terminal commands. Always be helpful, precise, and thoughtful.`,
     };
     setBots((prev) => [...prev, newCustomBot]);
-    setActiveBot(newCustomBot);
+    handleSelectBot(newCustomBot);
     setIsBotDrawerOpen(true);
   };
 
   const handleSendMessage = async (text: string) => {
+    // Concurrency policy: one run at a time. Sending during an active or
+    // settling run is refused instead of sharing its controller.
+    if (agentLoopRef.current.isBusy()) return;
+
     let currentThreadId = activeThreadId;
 
     if (!currentThreadId) {
       const newThread: Thread = {
         id: `thread_${Date.now()}`,
         botId: activeBot.id,
+        modelId: selectedModel.id,
         title: text.slice(0, 30) + (text.length > 30 ? "..." : ""),
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -258,43 +417,60 @@ export const App: React.FC = () => {
     const threadHistory = [...(transcripts[currentThreadId] || []), userEntry];
     setTranscripts({ ...transcripts, [currentThreadId]: threadHistory });
 
+    // The THREAD owns this run's context, not the global selection — history
+    // is never continued under a different agent's instructions.
+    const thread = threads.find((t) => t.id === currentThreadId);
+    const threadBot =
+      bots.find((b) => b.id === (thread?.botId ?? activeBot.id)) ?? activeBot;
+    const threadModel =
+      AVAILABLE_MODELS.find((m) => m.id === (thread?.modelId ?? threadBot.defaultModel)) ??
+      selectedModel;
+
     setIsGenerating(true);
+    setIsStopping(false);
 
-    await agentLoopRef.current.runTurn(
-      currentThreadId,
-      threadHistory,
-      activeBot,
-      selectedModel,
-      vault,
-      (updatedEntry) => {
-        setTranscripts((prev) => {
-          const list = prev[currentThreadId!] || [];
-          const idx = list.findIndex((e) => e.id === updatedEntry.id);
-          if (idx !== -1) {
-            const nextList = [...list];
-            nextList[idx] = updatedEntry;
-            return { ...prev, [currentThreadId!]: nextList };
-          }
-          return prev;
-        });
-      },
-      (newEntry) => {
-        setTranscripts((prev) => {
-          const list = prev[currentThreadId!] || [];
-          return { ...prev, [currentThreadId!]: [...list, newEntry] };
-        });
-      },
-      (toolCall, resolve) => {
-        approvalResolversRef.current.set(toolCall.id, resolve);
-      }
-    );
-
-    setIsGenerating(false);
+    try {
+      await agentLoopRef.current.runTurn(
+        currentThreadId,
+        threadHistory,
+        threadBot,
+        threadModel,
+        vault,
+        (updatedEntry) => {
+          setTranscripts((prev) => {
+            const list = prev[currentThreadId!] || [];
+            const idx = list.findIndex((e) => e.id === updatedEntry.id);
+            if (idx !== -1) {
+              const nextList = [...list];
+              nextList[idx] = updatedEntry;
+              return { ...prev, [currentThreadId!]: nextList };
+            }
+            return prev;
+          });
+        },
+        (newEntry) => {
+          setTranscripts((prev) => {
+            const list = prev[currentThreadId!] || [];
+            return { ...prev, [currentThreadId!]: [...list, newEntry] };
+          });
+        },
+        (toolCall, resolve) => {
+          approvalResolversRef.current.set(toolCall.id, resolve);
+        }
+      );
+    } finally {
+      // Settle before accepting new input: Stop keeps control until here.
+      setIsGenerating(false);
+      setIsStopping(false);
+    }
   };
 
   const handleStop = () => {
-    agentLoopRef.current.abort();
-    setIsGenerating(false);
+    if (agentLoopRef.current.abort()) {
+      // The run stays busy until it settles; the composer flips back to Send
+      // only after the awaited runTurn resolves.
+      setIsStopping(true);
+    }
   };
 
   const handleApproveTool = (toolCallId: string) => {
@@ -310,9 +486,15 @@ export const App: React.FC = () => {
       const tc = entry.toolCalls?.find((t) => t.id === toolCallId);
       if (tc && tc.name === "execute_shell" && tc.arguments.command) {
         try {
+          const command = tc.arguments.command as string;
+          const cwd = tc.arguments.cwd || systemInfo?.cwd || undefined;
           const grants = await TauriBridge.loadStandingGrants();
-          if (!grants.includes(tc.arguments.command)) {
-            await TauriBridge.saveStandingGrants([...grants, tc.arguments.command]);
+          const already = grants.some((g) =>
+            typeof g === "string" ? g === command : g.command === command
+          );
+          if (!already) {
+            // New grants are scoped to the workspace they were approved in.
+            await TauriBridge.saveStandingGrants([...grants, { command, cwd }]);
           }
         } catch (e) {
           console.error("Failed to save standing grant:", e);
@@ -348,7 +530,12 @@ export const App: React.FC = () => {
     setActiveBot(updated);
   };
 
-  const currentTranscript = activeThreadId ? transcripts[activeThreadId] || [] : [];
+  // Starters respect the model's real capability: file/command tasks are
+  // disabled on chat-only models instead of promising what can't run.
+  const toolCapable = selectedModel.supportsTools;
+  const starters = (activeBot.suggestedPrompts && activeBot.suggestedPrompts.length > 0
+    ? activeBot.suggestedPrompts
+    : DEFAULT_BOTS[0].suggestedPrompts!);
 
   return (
     <div className="flex h-screen w-screen bg-chrome text-primary font-sans overflow-hidden">
@@ -359,7 +546,7 @@ export const App: React.FC = () => {
         onSelectBot={handleSelectBot}
         threads={threads}
         activeThreadId={activeThreadId}
-        onSelectThread={setActiveThreadId}
+        onSelectThread={handleSelectThread}
         onNewThread={handleNewThread}
         onDeleteThread={handleDeleteThread}
         onTogglePinThread={handleTogglePinThread}
@@ -370,8 +557,8 @@ export const App: React.FC = () => {
       />
 
       {/* Main Chat Area */}
-      <main className="flex-1 flex flex-col h-full min-w-0 bg-chrome">
-        {/* Header */}
+      <main className="relative flex-1 flex flex-col h-full min-w-0 bg-chrome">
+        {/* Header — task identity + authoritative run status */}
         <header className="h-12 border-b border-stroke px-5 flex items-center justify-between shrink-0 bg-chrome">
           <div className="flex items-center gap-2.5 min-w-0">
             <span className="text-base select-none">{activeBot.avatar}</span>
@@ -380,66 +567,115 @@ export const App: React.FC = () => {
                 {activeBot.name}
               </h2>
               <p className="text-xxs text-quaternary truncate max-w-md leading-tight">
-                {activeBot.description}
+                {activeThread?.title && activeThread.title !== "New chat"
+                  ? activeThread.title
+                  : activeBot.description}
               </p>
             </div>
           </div>
 
-          <button
-            onClick={() => setIsBotDrawerOpen(true)}
-            className="px-3 py-1.5 rounded-lg border border-stroke bg-elevated hover:bg-elevatedHover text-xs font-medium text-secondary hover:text-primary transition-colors"
-          >
-            Configure
-          </button>
+          <div className="flex items-center gap-3 shrink-0">
+            {/* Status: text label is authoritative; Tavi is supplementary */}
+            <div
+              className="flex items-center gap-2 px-2 py-1 rounded-lg bg-elevated border border-stroke"
+              aria-live="polite"
+              title={runStatus.label}
+            >
+              <span aria-hidden="true">
+                <AnyBotCharacter mood={runStatus.mood} size={22} />
+              </span>
+              <span className="text-xxs font-medium text-secondary whitespace-nowrap">
+                {runStatus.label}
+              </span>
+            </div>
+            <button
+              onClick={() => setIsBotDrawerOpen(true)}
+              className="px-3 py-1.5 rounded-lg border border-stroke bg-elevated hover:bg-elevatedHover text-xs font-medium text-secondary hover:text-primary transition-colors"
+            >
+              Configure
+            </button>
+          </div>
         </header>
 
         {/* Transcript */}
-        <div className="flex-1 overflow-y-auto">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleTranscriptScroll}
+          className="flex-1 overflow-y-auto relative"
+        >
           {currentTranscript.length === 0 ? (
-            /* Welcome / empty state — centered like Grok */
-            <div className="h-full flex flex-col items-center justify-center px-6 max-w-xl mx-auto select-none">
-              <div className="w-12 h-12 rounded-full bg-bubbleUser flex items-center justify-center text-xl shadow-sm mb-3 select-none">
-                {activeBot.avatar}
-              </div>
-              <h3 className="text-lg font-semibold text-primary mb-1">
-                {activeBot.name}
-              </h3>
-              <p className="text-xs text-quaternary leading-relaxed mb-6 text-center">
-                {activeBot.description}
-              </p>
+            /* Welcome / empty state — scrollable, centered when it fits */
+            <div className="h-full overflow-y-auto">
+              <div className="min-h-full flex flex-col items-center justify-center px-6 py-8 max-w-xl mx-auto select-none">
+                <span aria-hidden="true" className="mb-1 shrink-0">
+                  <AnyBotCharacter mood={welcomeMood} size={88} />
+                </span>
+                <h3 className="text-lg font-semibold text-primary mb-1">
+                  {activeBot.name}
+                </h3>
+                <p className="text-xs text-quaternary leading-relaxed mb-5 text-center max-w-sm">
+                  {activeBot.description}
+                </p>
 
               <div className="grid grid-cols-1 gap-2 w-full">
-                {(activeBot.suggestedPrompts && activeBot.suggestedPrompts.length > 0
-                  ? activeBot.suggestedPrompts
-                  : DEFAULT_BOTS[0].suggestedPrompts!
-                ).map((item, idx) => (
-                  <button
-                    key={idx}
-                    onClick={() => handleSendMessage(item.prompt)}
-                    className="px-3.5 py-2.5 rounded-xl border border-stroke bg-elevated hover:bg-elevatedHover text-left text-xs text-secondary transition-colors flex items-center gap-2.5 group"
-                  >
-                    <div className="w-6 h-6 rounded-lg bg-hover flex items-center justify-center text-accent shrink-0 group-hover:scale-105 transition-transform font-mono font-bold text-xs">
-                      ⚡
-                    </div>
-                    <span className="min-w-0">
-                      <span className="block font-medium text-primary group-hover:text-accent transition-colors truncate">
-                        {item.title}
+                {starters.map((item, idx) => {
+                  const needsTools = !!item.toolsRequired && !toolCapable;
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => !needsTools && handleSendMessage(item.prompt)}
+                      disabled={needsTools}
+                      title={
+                        needsTools
+                          ? "This task needs a tool-capable model — pick one above the message box."
+                          : undefined
+                      }
+                      className={`px-3.5 py-2.5 rounded-xl border border-stroke bg-elevated text-left text-xs text-secondary transition-colors flex items-center gap-2.5 group ${
+                        needsTools
+                          ? "opacity-50 cursor-not-allowed"
+                          : "hover:bg-elevatedHover"
+                      }`}
+                    >
+                      <div
+                        className={`w-6 h-6 rounded-lg bg-hover flex items-center justify-center shrink-0 font-mono font-bold text-xs ${
+                          needsTools ? "text-quaternary" : "text-accent"
+                        }`}
+                        aria-hidden="true"
+                      >
+                        ⚡
+                      </div>
+                      <span className="min-w-0">
+                        <span
+                          className={`block font-medium truncate ${
+                            needsTools ? "text-secondary" : "text-primary group-hover:text-accent"
+                          } transition-colors`}
+                        >
+                          {item.title}
+                          {item.toolsRequired && !toolCapable && (
+                            <span className="ml-1.5 text-xxs px-1.5 py-px rounded bg-hover text-tertiary font-mono align-middle">
+                              needs tools
+                            </span>
+                          )}
+                        </span>
+                        <span className="block text-xxs text-quaternary truncate">
+                          {needsTools
+                            ? "Switch to a tool-capable model to run this"
+                            : item.subtitle}
+                        </span>
                       </span>
-                      <span className="block text-xxs text-quaternary truncate">
-                        {item.subtitle}
-                      </span>
-                    </span>
-                  </button>
-                ))}
+                    </button>
+                  );
+                })}
               </div>
 
-              <button
-                onClick={() => setIsLibraryModalOpen(true)}
-                className="mt-4 text-xs text-accent hover:underline flex items-center gap-1 font-medium"
-              >
-                <span>Browse all {bots.length} agents in library</span>
-                <ChevronRight className="w-3.5 h-3.5" />
-              </button>
+                <button
+                  onClick={() => setIsLibraryModalOpen(true)}
+                  className="mt-4 text-xs text-accent hover:underline flex items-center gap-1 font-medium"
+                >
+                  <span>Browse all {bots.length} agents in library</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
           ) : (
             <div className="py-4 space-y-1">
@@ -458,14 +694,54 @@ export const App: React.FC = () => {
           )}
         </div>
 
-        {/* Composer */}
-        <Composer
-          onSendMessage={handleSendMessage}
-          onStop={handleStop}
-          isGenerating={isGenerating}
-          selectedModel={selectedModel}
-          onSelectModel={setSelectedModel}
-        />
+        {/* Composer — hidden while a proposed change awaits review, so the
+            decision gets full attention. Shell approvals keep it visible. */}
+        {hasPendingWriteReview ? (
+          <div className="px-6 pb-4 pt-1 bg-chrome">
+            <div className="max-w-[min(760px,100%)] mx-auto flex items-center justify-between gap-3 px-4 py-3 rounded-2xl border border-stroke bg-elevated">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span aria-hidden="true">
+                  <AnyBotCharacter mood="approval" size={28} />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-primary">
+                    Waiting for your review
+                  </p>
+                  <p className="text-xxs text-quaternary truncate">
+                    A proposed file change needs Apply or Decline before anything runs.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={jumpToLatest}
+                className="px-3 py-1.5 rounded-lg border border-stroke bg-elevated hover:bg-elevatedHover text-xs font-medium text-secondary hover:text-primary transition-colors flex items-center gap-1.5 shrink-0"
+              >
+                <Eye className="w-3.5 h-3.5" aria-hidden="true" />
+                Review change
+              </button>
+            </div>
+          </div>
+        ) : (
+          <Composer
+            onSendMessage={handleSendMessage}
+            onStop={handleStop}
+            isGenerating={isGenerating}
+            isStopping={isStopping}
+            selectedModel={selectedModel}
+            onSelectModel={setSelectedModel}
+          />
+        )}
+
+        {/* Jump to latest — shown only when the reader scrolled up */}
+        {!isNearBottom && !hasPendingWriteReview && (
+          <button
+            onClick={jumpToLatest}
+            className="absolute bottom-28 right-6 z-40 px-3 py-1.5 rounded-full border border-stroke bg-elevated shadow-md text-xs font-medium text-secondary hover:text-primary hover:bg-elevatedHover transition-colors flex items-center gap-1.5"
+          >
+            <ArrowDown className="w-3.5 h-3.5" aria-hidden="true" />
+            Jump to latest
+          </button>
+        )}
       </main>
 
       {/* Right Drawer */}
@@ -484,7 +760,7 @@ export const App: React.FC = () => {
         onSaveVault={handleSaveVault}
       />
 
-      {/* Bot Library & Marketplace Modal */}
+      {/* Bot Library Modal */}
       <BotLibraryModal
         isOpen={isLibraryModalOpen}
         onClose={() => setIsLibraryModalOpen(false)}

@@ -108,8 +108,8 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ before, after, path }) =
     collapsedRuns.find((r) => !expanded[r.start] && idx === r.start);
 
   const rowClasses: Record<RowType, string> = {
-    add: "bg-[#10ab6114] text-[#0b6b3d]",
-    del: "bg-[#e72e3b0f] text-[#9c1f29]",
+    add: "bg-[#697c651f] text-[#41513d]",
+    del: "bg-[#d86a4f17] text-[#8a3a24]",
     ctx: "text-secondary",
   };
 
@@ -130,10 +130,13 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ before, after, path }) =
 
       <div className="py-1.5 font-mono text-xxs overflow-x-auto max-h-56 overflow-y-auto select-text">
         {rows.map((row, idx) => {
-          const run = runAt(idx);
-          if (run) return null; // inside a collapsed unchanged run
-
           const marker = markerAt(idx);
+          const run = runAt(idx);
+          // Interior rows of a collapsed run are hidden — but the first
+          // hidden row renders the expansion control above it (the control
+          // used to be unreachable because the run check ran first).
+          if (run && !marker) return null;
+
           return (
             <React.Fragment key={idx}>
               {marker && (

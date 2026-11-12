@@ -57,25 +57,29 @@ export async function streamChatCompletion(
   messages: ChatMessagePayload[],
   systemPrompt: string,
   callbacks: StreamCallbacks,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  temperature?: number
 ): Promise<void> {
   try {
     if (model.provider === "anthropic") {
-      await streamAnthropic(model, vault, messages, systemPrompt, callbacks, signal);
+      await streamAnthropic(model, vault, messages, systemPrompt, callbacks, signal, temperature);
     } else if (model.provider === "ollama") {
-      await streamOllama(model, vault, messages, systemPrompt, callbacks, signal);
+      await streamOllama(model, vault, messages, systemPrompt, callbacks, signal, temperature);
     } else {
       // OpenAI or Grok (xAI uses OpenAI-compatible API format)
-      await streamOpenAI(model, vault, messages, systemPrompt, callbacks, signal);
+      await streamOpenAI(model, vault, messages, systemPrompt, callbacks, signal, temperature);
     }
   } catch (err: any) {
     if (signal?.aborted) return;
-    // Idle-timeout stalls (WebKitGTK can leave reader.read() pending after
-    // the server closes) end the stream gracefully: keep the partial answer,
-    // signal finished, and don't surface a scary error for usable content.
+    // An idle-timeout stall (WebKitGTK can leave reader.read() pending after
+    // the server closes) is an INTERRUPTED response, not a finished one: the
+    // partial answer stays visible and the failure is labeled honestly.
     if (err instanceof StreamIdleTimeout) {
-      callbacks.onFinished?.();
-      return;
+      const interrupted = new Error(
+        "The model stream went silent before completing. The partial answer above may be incomplete — send again to continue."
+      );
+      callbacks.onError?.(interrupted);
+      throw interrupted;
     }
     callbacks.onError?.(err instanceof Error ? err : new Error(String(err)));
     // Re-throw so the agent loop renders the failure; a swallowed error
@@ -91,7 +95,8 @@ async function streamAnthropic(
   messages: ChatMessagePayload[],
   systemPrompt: string,
   callbacks: StreamCallbacks,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  temperature?: number
 ) {
   const apiKey = vault.anthropicApiKey?.trim();
   if (!apiKey) {
@@ -159,6 +164,9 @@ async function streamAnthropic(
       type: "enabled",
       budget_tokens: 2048,
     };
+    // Anthropic rejects custom temperature alongside extended thinking.
+  } else if (typeof temperature === "number") {
+    payload.temperature = temperature;
   }
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -199,8 +207,22 @@ async function streamAnthropic(
       const dataStr = trimmed.slice(6);
       if (dataStr === "[DONE]") continue;
 
+      // Error events arrive as SSE frames with HTTP 200 — they must fail
+      // the turn, not fall through to a silent onFinished. Parsed outside
+      // the per-frame try so the error propagates.
+      let parsed: any;
       try {
-        const parsed = JSON.parse(dataStr);
+        parsed = JSON.parse(dataStr);
+      } catch {
+        continue;
+      }
+      if (parsed.type === "error") {
+        throw new Error(
+          `Anthropic stream error: ${parsed.error?.message ?? JSON.stringify(parsed.error ?? parsed)}`
+        );
+      }
+
+      try {
         if (parsed.type === "content_block_start") {
           if (parsed.content_block?.type === "thinking") {
             // Started thinking
@@ -255,7 +277,8 @@ async function streamOpenAI(
   messages: ChatMessagePayload[],
   systemPrompt: string,
   callbacks: StreamCallbacks,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  temperature?: number
 ) {
   const isGrok = model.provider === "grok";
   // Each provider only ever gets its own credential — never fall back to
@@ -297,6 +320,9 @@ async function streamOpenAI(
     tools: OPENAI_TOOLS,
     stream: true,
   };
+  if (typeof temperature === "number") {
+    payload.temperature = temperature;
+  }
 
   const response = await fetch(endpoint, {
     method: "POST",
@@ -334,8 +360,21 @@ async function streamOpenAI(
       const dataStr = trimmed.slice(6);
       if (dataStr === "[DONE]") continue;
 
+      // Error frames arrive with HTTP 200 — fail the turn instead of
+      // silently finishing. Parsed outside the per-frame try.
+      let parsed: any;
       try {
-        const parsed = JSON.parse(dataStr);
+        parsed = JSON.parse(dataStr);
+      } catch {
+        continue;
+      }
+      if (parsed.error) {
+        throw new Error(
+          `${isGrok ? "xAI (Grok)" : "OpenAI"} stream error: ${parsed.error.message ?? JSON.stringify(parsed.error)}`
+        );
+      }
+
+      try {
         const choice = parsed.choices?.[0];
         if (!choice) continue;
 
@@ -403,7 +442,8 @@ async function streamOllama(
   messages: ChatMessagePayload[],
   systemPrompt: string,
   callbacks: StreamCallbacks,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  temperature?: number
 ) {
   const baseUrl = (vault.ollamaBaseUrl?.trim() || "http://localhost:11434").replace(/\/$/, "");
 
@@ -432,6 +472,9 @@ async function streamOllama(
   };
   if (model.supportsTools) {
     payload.tools = OPENAI_TOOLS;
+  }
+  if (typeof temperature === "number") {
+    payload.options = { ...(payload.options as object | undefined), temperature };
   }
 
   const response = await fetch(`${baseUrl}/api/chat`, {
@@ -467,8 +510,19 @@ async function streamOllama(
       const trimmed = line.trim();
       if (!trimmed) continue;
 
+      // Ollama reports failures as {"error": "..."} lines inside the NDJSON
+      // stream — surface them instead of treating the turn as complete.
+      let parsed: any;
       try {
-        const parsed = JSON.parse(trimmed);
+        parsed = JSON.parse(trimmed);
+      } catch {
+        continue;
+      }
+      if (parsed.error) {
+        throw new Error(`Ollama stream error: ${parsed.error}`);
+      }
+
+      try {
         const msg = parsed.message;
         if (!msg) continue;
 

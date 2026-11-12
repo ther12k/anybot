@@ -32,8 +32,11 @@ export default {
         danger: {
           DEFAULT: "var(--sand-bg-danger-primary)",
           hover: "var(--sand-bg-danger-primary-hover)",
+          fill: "var(--sand-bg-danger-fill)",
         },
         success: "var(--sand-bg-green-primary)",
+        sage: "var(--sand-bg-sage-fill)",
+        coral: "var(--sand-bg-accent-bright)",
       },
       borderRadius: {
         bubble: "18px", // --sand-transcript-prose-bubble-radius

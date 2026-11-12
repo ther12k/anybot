@@ -218,8 +218,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               className={inputCls}
             />
             <p className="text-xxs text-quaternary">
-              Detected locally: phi3:mini is available. Pull deepseek-r1 or
-              llama3.3 for tool calling.
+              Saved endpoint — availability is checked when you send a message,
+              not assumed. Models that support tools enable file &amp; command
+              tasks; pull deepseek-r1 or llama3.3 for local tool calling.
             </p>
           </div>
 
@@ -234,7 +235,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <span>Auto-approve safe commands</span>
               </div>
               <p className="text-xxs text-quaternary leading-relaxed">
-                Read-only commands run automatically; changes always ask first.
+                Global switch: read-only commands run automatically when this
+                AND the agent&apos;s own switch are on. Changes always ask first.
               </p>
             </div>
             <button

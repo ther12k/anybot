@@ -1,6 +1,6 @@
 # AnyBot ⚡ - Autonomous Desktop AI Agent
 
-**AnyBot** is an ultra-fast, lightweight desktop AI agent inspired by the architecture and capabilities of **Grok Bot** (`sand`). Built with **Tauri v2**, **Rust**, and **React 19**, AnyBot pairs local system access (terminal execution, file read/write, directory inspection) with modern multi-model AI reasoning (Anthropic Claude, OpenAI, Local Ollama, and xAI Grok).
+**AnyBot** is a lightweight desktop AI agent inspired by the architecture and capabilities of **Grok Bot** (`sand`). Built with **Tauri v2**, **Rust**, and **React 18**, AnyBot pairs local system access (terminal execution, file read/write, directory inspection) with modern multi-model AI reasoning (Anthropic Claude, OpenAI, Local Ollama, and xAI Grok).
 
 ---
 
@@ -12,10 +12,11 @@ During analysis of `grok-bot_0.79.4_amd64.deb` (`@anysphere/grok-bot` / SpaceXAI
 * **Agent Loop**: Models (`grok-4.5`, `grok-4.6`, and `claude-4.5-sonnet`) were coordinated via a gateway, streaming thinking blocks (`Thinking` pills) and tool execution cards (`Running commands`, `Reading files`).
 
 ### How AnyBot Improves on Grok Bot
-* **Native Rust Performance**: Instead of a heavy Node.js daemon and Electron runtime consuming ~400MB+ RAM, AnyBot uses a native **Rust Tauri backend** consuming only ~25MB of RAM with sub-second startup.
-* **Unified Multi-Provider Support**: Supports **Anthropic Claude** (with extended thinking tokens), **OpenAI** (`gpt-4o`, `o3-mini`), **Local Ollama** (`deepseek-r1`, `llama3.3` for 100% private offline AI), and **xAI Grok**.
-* **Human-in-the-Loop Safety**: AST and prefix-based command categorization (`Safe` vs `Mutative` vs `Dangerous`), allowing instant auto-execution of read-only queries while requiring explicit approval cards for changes.
-* **Live Diff Viewer**: Built-in visual side-by-side / inline diff viewer showing file modifications before and after writing.
+* **Native Rust Backend**: Instead of a Node.js daemon inside an Electron runtime, AnyBot runs a native **Rust Tauri backend**. (We don't publish memory/startup numbers without a reproducible benchmark — measure it on your hardware.)
+* **Unified Multi-Provider Support**: **Anthropic Claude** (with extended thinking tokens), **OpenAI** (`gpt-4o`, `o3-mini`), **Local Ollama**, and **xAI Grok**. Each provider only ever receives its own credential.
+* **Human-in-the-Loop Safety**: Policy- and argument-aware command classification (`Safe` vs `Mutative` vs `Dangerous`) — read-only forms auto-run only when their arguments are proven read-only; everything else asks.
+* **Reviewed Changes**: File writes prepare the exact diff BEFORE approval; the reviewer sees what will change, and approval is bound to that exact proposal (a file changed after review forces re-review instead of overwriting).
+* **Meet Tavi 🌱**: a small companion character whose expression follows the real run state — never a substitute for the status text.
 
 ---
 
@@ -25,28 +26,28 @@ During analysis of `grok-bot_0.79.4_amd64.deb` (`@anysphere/grok-bot` / SpaceXAI
 ┌───────────────────────────────────────────────────────────────┐
 │                     AnyBot Desktop App                        │
 │                                                               │
-│  ┌────────────────────── React 19 Frontend ────────────────┐  │
+│  ┌────────────────────── React 18 Frontend ────────────────┐  │
 │  │                                                         │  │
 │  │  ┌──────────────┐  ┌───────────────────┐  ┌───────────┐ │  │
 │  │  │ Left Sidebar │  │   Chat Transcript │  │ Right Info│ │  │
 │  │  │ - Bot Roster │  │ - Thinking Drawer │  │ Drawer    │ │  │
 │  │  │ - Thread List│  │ - Tool Cards (Appr)│ │ - Bot Meta │ │  │
-│  │  │ - Settings   │  │ - Code Diff Viewer│  │ - Skills  │ │  │
+│  │  │ - Settings   │  │ - Change Review   │ │ - Skills  │ │  │
 │  │  │ - New Chat   │  │ - Model Switcher  │  │ - Safety  │ │  │
 │  │  └──────────────┘  └───────────────────┘  └───────────┘ │  │
 │  │                                                         │  │
 │  │  ┌────────────────────────────────────────────────────┐ │  │
-│  │  │       Unified Agent Loop & Multi-Provider Client   │ │  │
-│  │  │   (Claude Thinking + OpenAI + Ollama + xAI Grok)   │ │  │
+│  │  │  Agent Loop (per-run context) & Multi-Provider     │ │  │
+│  │  │  Client (Claude + OpenAI + Ollama + xAI Grok)      │ │  │
 │  │  └────────────────────────────────────────────────────┘ │  │
 │  └───────────────────────────┬─────────────────────────────┘  │
 │                              │ Tauri IPC (invoke/listen)      │
 │  ┌───────────────────────────▼─────────────────────────────┐  │
 │  │                   Tauri / Rust Backend                  │  │
 │  │                                                         │  │
-│  │  - Native Shell Executor (terminal commands + env)      │  │
-│  │  - Atomic File I/O (safe writes, real diffs)            │  │
-│  │  - Safety & Permission Evaluator (fail-closed)          │  │
+│  │  - Native Shell Executor (process-group tracked)        │  │
+│  │  - Atomic File I/O (audit every read/write outcome)     │  │
+│  │  - Policy re-evaluation at execution (fail-closed)      │  │
 │  │  - Local API-key store (plaintext JSON, see note)       │  │
 │  │  - System Diagnostics (OS, CWD, user environment)       │  │
 │  └─────────────────────────────────────────────────────────┘  │
@@ -64,8 +65,9 @@ During analysis of `grok-bot_0.79.4_amd64.deb` (`@anysphere/grok-bot` / SpaceXAI
 
 ### Installation
 ```bash
-# Clone or navigate to the project directory
-cd /home/rizky/Workspace/Learning/anybot
+# Clone the repository
+git clone https://github.com/ther12k/anybot.git
+cd anybot
 
 # Install npm dependencies
 npm install
@@ -82,7 +84,7 @@ npm run dev
 
 ### Building for Production
 ```bash
-# Compile optimized native binary and .deb installer
+# Compile optimized native binary and installer
 npx tauri build
 ```
 
@@ -90,21 +92,28 @@ npx tauri build
 
 ## 🤖 Built-in Agent Personas
 
-1. **Grok (⚡)**: General-purpose witty, ultra-capable desktop assistant with full command and file access.
-2. **Code Architect (🛠️)**: Specialized in software architecture, code reviews, automated refactoring, and debugging.
-3. **Deep Researcher (🔬)**: Deep analytical research, document synthesis, and report generation.
-4. **Local Offline Agent (🦙)**: 100% offline agent running locally on your hardware via Ollama (supports `deepseek-r1` and `llama3.3`).
+Ten pre-configured agents ship with the library (categories: Code, Research, Productivity, Writing, Fun). Highlights:
+
+1. **Grok (⚡)**: general-purpose witty desktop assistant; defaults to the local `phi3:mini` model so it works with zero API keys (chat-only until you switch to a tool-capable model).
+2. **Code Architect (🛠️) / PR Reviewer & SecOps (🛡️)**: architecture, code review, and security auditing with native tool access.
+3. **Deep Researcher (🔬)**: analytical research and synthesis (chat-oriented starters).
+4. **Local Offline Agent (🦙)**: a persona designed to pair with local Ollama models. Honesty note: where your prompts actually go is decided by the **model selector**, not the agent name — pick a local model to keep processing local.
+
+Starter prompts are capability-aware: on a chat-only model (e.g. `phi3:mini`), file/command starters are shown disabled with an explanation instead of promising actions the model can't take.
 
 ---
 
 ## 🛡️ Governance & Permissions (Inspired by OpenBot & Grok Bot)
 
 * **Deny-First Policy Engine**: Configurable via `~/.config/anybot/policy.json`. Deny patterns (`rm -rf /`, `mkfs`, `dd if=`) and `deny_commands` are evaluated first and cannot be overridden by user grants. Unknown commands default to requiring approval.
-* **Fail-Closed Shell Execution**: Compound or redirected syntax (`;`, `&&`, `||`, `|`, `>`, `$(`) never inherits a safe prefix — commands like `pwd && touch x` or `cat a > b` always require explicit approval.
-* **Standing Grants ("Always allow")**: Users can choose **Always allow** on approval cards for repetitive commands (`cargo test`, `npm run build`), persisting exact-match grants in `~/.config/anybot/standing-grants.json`. Grants can never override dangerous patterns or compound syntax.
-* **Audit Logging (`~/.config/anybot/audit.jsonl`)**: Every tool decision and outcome is recorded to an append-only JSONL log with ISO timestamps, decision provenance (`auto_safe`, `standing_grant`, `approved`, `rejected`), outcome status (`completed`, `failed`, `killed`, `rejected`, `timeout`), duration in ms, and call IDs.
-* **Stop with Native Process Group Kill**: Clicking **Stop** (■) cancels streaming, resolves any pending approval as denied, and sends a native `SIGKILL` to the shell's process group so long-running commands (and their child processes) terminate immediately.
-* **Mutative actions**: File modifications (`write_file`) always prompt with an approval card showing an interactive line-level diff before writing.
+* **Argument-aware classification**: Allowlisted commands are validated by form, not just name — `git branch -D x`, `git branch <new>`, `git remote remove`, `git tag v1`, and `env <cmd>` are all approval-required; `env touch x` no longer inherits `env`'s safe reputation. `cargo check`/`npx` are deliberately NOT auto-approved (build scripts / package installs execute code).
+* **Fail-closed shell execution**: Compound, redirected, OR BACKGROUND syntax (`;`, `&&`, `||`, `&`, `|`, `>`, `$(`, backticks) never inherits a safe prefix — `pwd && touch x`, `cat a > b`, and `ls & touch x` all require approval.
+* **Standing grants ("Always allow")**: Exact command identity, **case-sensitive**, and (for new grants) **scoped to the working directory** they were approved in. Legacy string grants still match everywhere. Grants can never override deny patterns, deny commands, or compound syntax.
+* **Native enforcement point**: The shell endpoint re-evaluates policy at execution time. A mutative command arriving without a recorded `approved` decision is refused natively — the frontend's decision string is verified, not trusted. File writes without a recorded approval are refused the same way.
+* **Audit logging (`~/.config/anybot/audit.jsonl`)**: Every tool action and outcome is recorded — shell (completed/failed/killed/timeout/blocked/spawn_error), file reads, directory listings, and writes (including failures, which are audited before the error returns). Rows carry decision provenance (`auto_safe`, `standing_grant`, `approved`, `rejected`, `blocked`), durations, and call IDs.
+* **Stop that actually stops**: Clicking **Stop** cancels streaming, resolves pending approvals as denied, and `SIGKILL`s the shell's process group (Unix). The composer shows **Stopping…** until the run has fully settled — you can't start a new task into a controller a dying run would clear (each run owns its own controller, approvals, and shell registry). Timeouts also kill the whole process group and reap it before reporting.
+* **Platform limits**: process-group kill and timeout cleanup are Unix-only; on Windows the executor kills the process leader only and reports the limitation.
+* **Mutative actions**: `write_file` always prompts. The approval card shows the exact proposed diff (or full content for new files) BEFORE any approval control; approving writes only the reviewed proposal, and a file that changed between review and apply forces re-review instead of being overwritten.
 
 ---
 
@@ -114,6 +123,12 @@ Click the **gear icon** in the sidebar to configure:
 * **Anthropic API key** — Claude 3.7 Sonnet (thinking) and 3.5 Sonnet / Haiku.
 * **OpenAI API key** — GPT-4o and o3-mini.
 * **xAI (Grok) API key** — Grok 2 / Grok Beta. Each provider only ever receives its own key.
-* **Ollama endpoint** — local models at `http://localhost:11434` by default.
+* **Ollama endpoint** — local models at `http://localhost:11434` by default. Availability is checked when you send, not assumed from a saved URL.
 
 ⚠️ **Keys are stored in plain text** at `~/.config/anybot/config.json` (mode depends on your umask). Protect your user account accordingly; OS keychain encryption is planned.
+
+## 🧪 Verification status
+
+* 21 Rust tests cover the classifier (mutative git forms, background `&`, zero-arg commands, scoped grants, fail-closed corruption) and the executor (kill stops `sleep 30` <5s, timeout terminates the group, native block of unapproved mutative commands).
+* TypeScript strict-clean; production build passes.
+* Not yet verified: Windows behavior, packaged installers, live provider contracts with real credentials.

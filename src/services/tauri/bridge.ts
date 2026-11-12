@@ -1,5 +1,14 @@
 import { CommandSafetyResult } from "../../types";
 
+/**
+ * A standing grant ("Always allow" answer). Legacy grants are plain command
+ * strings (workspace-agnostic); new grants are scoped to the working
+ * directory they were approved in.
+ */
+export type StandingGrant =
+  | string
+  | { command: string; cwd?: string };
+
 // Check if running inside Tauri webview
 export const isTauriEnvironment = (): boolean => {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -83,8 +92,8 @@ async function safeInvoke<T>(cmd: string, args: Record<string, any> = {}): Promi
 }
 
 export const TauriBridge = {
-  checkShellSafety: async (command: string): Promise<CommandSafetyResult> => {
-    return safeInvoke<CommandSafetyResult>("check_shell_safety", { command });
+  checkShellSafety: async (command: string, cwd?: string): Promise<CommandSafetyResult> => {
+    return safeInvoke<CommandSafetyResult>("check_shell_safety", { command, cwd });
   },
 
   executeShellCommand: async (
@@ -115,12 +124,12 @@ export const TauriBridge = {
   },
 
   /** Standing grants ("Always allow" answers), persisted as JSON. */
-  loadStandingGrants: async (): Promise<string[]> => {
-    const raw = await safeInvoke<string>("load_standing_grants");
+  loadStandingGrants: async (): Promise<StandingGrant[]> => {
+    const raw = await safeInvoke<StandingGrant[]>("load_standing_grants");
     return Array.isArray(raw) ? raw : [];
   },
 
-  saveStandingGrants: async (grants: string[]): Promise<boolean> => {
+  saveStandingGrants: async (grants: StandingGrant[]): Promise<boolean> => {
     return safeInvoke("save_standing_grants", { grants });
   },
 

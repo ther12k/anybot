@@ -198,8 +198,9 @@ export const BotDrawer: React.FC<BotDrawerProps> = ({
               <span>Auto-run safe commands</span>
             </div>
             <p className="text-xxs text-quaternary leading-relaxed">
-              Read-only commands (ls, cat, git status) run without asking.
-              Changes always ask first.
+              Read-only commands (ls, cat, git status) run without asking — this
+              switch AND the global one in Settings must both be on. Changes
+              always ask first.
             </p>
           </div>
           <button

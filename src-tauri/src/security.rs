@@ -1,19 +1,26 @@
 use crate::models::{CommandSafetyResult, CommandSafetyTier};
-use crate::policy::{load_policy, load_standing_grants_sync, Policy, COMPOUND_MARKERS};
+use crate::policy::{load_policy, load_standing_grants_sync, Policy, StandingGrant, COMPOUND_MARKERS};
+
+/// Commands that are read-only *only* with no arguments. With arguments they
+/// execute or reconfigure: `env touch x` runs a program, `hostname new-name`
+/// renames the machine. Any argument → approval, fail closed.
+const ZERO_ARG_READ_ONLY: &[&str] = &["env", "hostname"];
 
 /// Evaluate a shell command against the loaded policy and standing grants.
 ///
 /// Decision order (deny-before-allow, OpenBot-style):
 ///   1. Dangerous deny patterns        → Dangerous (never auto-run)
 ///   2. deny_commands list             → Mutative (never auto-run, even if granted)
-///   3. Compound/redirect syntax       → Mutative (never inherits a safe prefix)
-///   4. Standing grant (exact match)   → Safe (explicit prior user consent)
-///   5. Read-only allowlist            → Safe
+///   3. Compound/redirect/background   → Mutative (never inherits a safe prefix)
+///   4. Standing grant (exact + cwd)   → Safe (explicit prior user consent)
+///   5. Read-only allowlist, with argument validation for forms that are
+///      only sometimes read-only (git subcommands, zero-arg commands)
 ///   6. Anything else                  → Mutative (approval required)
 pub fn evaluate_with_policy(
     command: &str,
     policy: &Policy,
-    grants: &[String],
+    grants: &[StandingGrant],
+    cwd: Option<&str>,
 ) -> CommandSafetyResult {
     let trimmed = command.trim();
     let lower = trimmed.to_lowercase();
@@ -49,10 +56,11 @@ pub fn evaluate_with_policy(
         );
     }
 
-    let first_word = lower.split_whitespace().next().unwrap_or("").to_string();
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    let first_word = tokens.first().copied().unwrap_or("");
 
     // 2. Denied commands — approval always, grants cannot override.
-    if policy.deny_commands.iter().any(|c| c.eq_ignore_ascii_case(&first_word)) {
+    if policy.deny_commands.iter().any(|c| c.eq_ignore_ascii_case(first_word)) {
         return out(
             CommandSafetyTier::Mutative,
             true,
@@ -61,20 +69,21 @@ pub fn evaluate_with_policy(
         );
     }
 
-    // 3. Compound / redirected syntax — never inherits a safe prefix.
+    // 3. Compound / redirected / background syntax — never inherits a safe
+    // prefix. A bare `&` is enough: `ls & touch x` runs the second command.
     if COMPOUND_MARKERS.iter().any(|m| lower.contains(m)) {
         return out(
             CommandSafetyTier::Mutative,
             true,
-            "Compound or redirected shell syntax; approval required for the whole command.",
+            "Compound, redirected, or background shell syntax; approval required for the whole command.",
             false,
         );
     }
 
     // 4. Standing grant — the user previously chose "Always allow" for this
-    // exact command. Deny rules above have already run, so a grant can never
-    // override them.
-    if grants.iter().any(|g| g.trim().eq_ignore_ascii_case(trimmed)) {
+    // exact command (case-sensitive) in this working directory. Deny rules
+    // above have already run, so a grant can never override them.
+    if grants.iter().any(|g| grant_matches(g, trimmed, cwd)) {
         return out(
             CommandSafetyTier::Safe,
             false,
@@ -83,30 +92,28 @@ pub fn evaluate_with_policy(
         );
     }
 
-    // 5. Read-only allowlist.
-    let matches_phrase = |phrase: &str| {
-        let p = phrase.to_lowercase();
-        lower == p || lower.starts_with(&format!("{p} "))
-    };
-
-    let is_read_only = if policy.allow_phrases.iter().any(|p| matches_phrase(p)) {
-        true
+    // 5. Read-only allowlist, with argument validation.
+    let is_read_only = if ZERO_ARG_READ_ONLY.contains(&first_word) {
+        // `env` / `hostname` print when bare; with arguments they act.
+        tokens.len() == 1
     } else if first_word == "git" {
-        let sub = lower
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("")
-            .to_string();
-        policy.git_read_only.iter().any(|s| s.eq(&sub))
+        let sub = tokens.get(1).copied().unwrap_or("");
+        policy.git_read_only.iter().any(|s| s.eq(sub))
+            && git_subcommand_is_read_only(sub, &tokens[2..])
     } else {
-        policy.allow_read_only.iter().any(|c| c.eq(&first_word))
+        let matches_phrase = |phrase: &str| {
+            let p = phrase.to_lowercase();
+            lower == p || lower.starts_with(&format!("{p} "))
+        };
+        policy.allow_phrases.iter().any(|p| matches_phrase(p))
+            || policy.allow_read_only.iter().any(|c| c.eq(first_word))
     };
 
     if is_read_only {
         return out(
             CommandSafetyTier::Safe,
             false,
-            "Read-only inspection command.",
+            "Read-only inspection command (arguments validated).",
             false,
         );
     }
@@ -120,11 +127,93 @@ pub fn evaluate_with_policy(
     )
 }
 
+/// A case-sensitive exact command identity, optionally scoped to one working
+/// directory. A scoped grant never matches an unknown cwd (fail closed).
+fn grant_matches(grant: &StandingGrant, command: &str, cwd: Option<&str>) -> bool {
+    let (grant_command, grant_cwd) = match grant {
+        StandingGrant::Simple(c) => (c.trim(), None),
+        StandingGrant::Scoped { command, cwd } => (command.trim(), cwd.as_deref()),
+    };
+    if grant_command != command.trim() {
+        return false;
+    }
+    match (grant_cwd, cwd) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(g), Some(c)) => g == c,
+    }
+}
+
+/// Argument validation for `git` subcommands that are in the read-only list.
+/// Several are only read-only for *some* forms: `git branch -D x` deletes,
+/// plain `git branch <name>` creates, `git remote remove` mutates, and
+/// `git tag <name>` creates a tag. Unknown forms fail closed → approval.
+fn git_subcommand_is_read_only(sub: &str, args: &[&str]) -> bool {
+    match sub {
+        // Listing-only flags. Anything else (incl. bare `git branch name`)
+        // is branch creation, rename, copy, or deletion → approval.
+        // With an explicit --list/-l, positional tokens are patterns.
+        "branch" => {
+            if args.iter().any(|a| *a == "--list" || *a == "-l") {
+                return true;
+            }
+            const LIST_FLAGS: &[&str] = &[
+                "-a", "-r", "-v", "-vv", "-q", "-i", "--all",
+                "--remotes", "--show-current", "--merged", "--no-merged",
+                "--color", "--no-color", "--column", "--no-column",
+            ];
+            args.iter().all(|a| {
+                LIST_FLAGS.contains(a)
+                    || a.starts_with("--sort=")
+                    || a.starts_with("--format=")
+                    || a.starts_with("--contains")
+                    || a.starts_with("--no-contains")
+                    || a.starts_with("--points-at")
+            })
+        }
+        // Listing plus positional inspection subcommands; add/rename/remove/
+        // set-url/prune and friends all mutate the repository config.
+        "remote" => match args.first().copied().unwrap_or("") {
+            "" => true,
+            "-v" | "--verbose" => true,
+            "show" | "get-url" => args.len() >= 2,
+            _ => false,
+        },
+        // Listing/verification flags only. `git tag <name>` creates;
+        // `git tag -d` deletes; `-a`/`-s`/`-m`/`-f` all mutate.
+        // With an explicit -l/--list the positional tokens are patterns;
+        // with -v/--verify they are tag names to verify. Both read-only.
+        "tag" => {
+            if args
+                .iter()
+                .any(|a| *a == "--list" || *a == "-l" || *a == "--verify" || *a == "-v")
+            {
+                return true;
+            }
+            const LIST_FLAGS: &[&str] = &[
+                "-v", "--verify", "--contains", "--no-contains",
+                "--merged", "--no-merged", "--points-at", "-i", "--color",
+                "--no-color", "--column", "--no-column", "-e", "--omit-empty",
+            ];
+            args.iter().all(|a| {
+                LIST_FLAGS.contains(a)
+                    || a.starts_with("--sort=")
+                    || a.starts_with("--format=")
+                    || a.starts_with("-n")
+            })
+        }
+        // Pure readers for every flag form: nothing to validate.
+        "status" | "log" | "diff" | "show" | "describe" | "rev-parse"
+        | "blame" | "shortlog" | "ls-files" => true,
+        _ => false,
+    }
+}
+
 /// Convenience wrapper used by the Tauri command: loads the current policy
 /// file and standing grants, then evaluates. A corrupt policy file falls
 /// back to empty allowlists (everything requires approval).
-pub fn evaluate_command_safety(command: &str) -> CommandSafetyResult {
-    evaluate_with_policy(command, &load_policy(), &load_standing_grants_sync())
+pub fn evaluate_command_safety(command: &str, cwd: Option<&str>) -> CommandSafetyResult {
+    evaluate_with_policy(command, &load_policy(), &load_standing_grants_sync(), cwd)
 }
 
 #[cfg(test)]
@@ -143,14 +232,72 @@ mod tests {
             "git log --oneline",
             "cat README.md",
             "grep -r foo .",
-            "cargo check",
             "node -v",
             "pwd",
+            "env",
+            "hostname",
+            "printenv HOME",
+            "git branch -a",
+            "git branch --list main",
+            "git remote -v",
+            "git remote show origin",
+            "git remote get-url origin",
+            "git tag",
+            "git tag -l v1*",
+            "git tag -v v1.0",
         ] {
-            let res = evaluate_with_policy(cmd, &policy(), &[]);
+            let res = evaluate_with_policy(cmd, &policy(), &[], None);
             assert_eq!(res.tier, CommandSafetyTier::Safe, "expected safe: {cmd}");
             assert!(!res.requires_confirmation, "expected no approval: {cmd}");
             assert!(!res.standing_grant, "not a grant: {cmd}");
+        }
+    }
+
+    #[test]
+    fn zero_arg_read_only_rejects_arguments() {
+        // `env` and `hostname` execute or reconfigure with arguments.
+        for cmd in ["env touch example.txt", "env python -c x", "hostname new-name"] {
+            let res = evaluate_with_policy(cmd, &policy(), &[], None);
+            assert_eq!(res.tier, CommandSafetyTier::Mutative, "expected approval: {cmd}");
+            assert!(res.requires_confirmation);
+        }
+    }
+
+    #[test]
+    fn git_mutative_forms_within_read_only_subcommands() {
+        for cmd in [
+            "git branch -D example",          // delete branch
+            "git branch new-feature",         // create branch
+            "git branch -m old new",          // rename
+            "git remote remove origin",       // delete remote
+            "git remote add up https://x",    // add remote
+            "git remote prune origin",        // mutate tracking refs
+            "git tag v1.0",                   // create tag
+            "git tag -d v1.0",                // delete tag
+            "git tag -a v1.0 -m msg",         // create annotated tag
+        ] {
+            let res = evaluate_with_policy(cmd, &policy(), &[], None);
+            assert_eq!(res.tier, CommandSafetyTier::Mutative, "expected approval: {cmd}");
+            assert!(res.requires_confirmation);
+        }
+    }
+
+    #[test]
+    fn background_operator_is_compound() {
+        // Bare `&` backgrounds the first part and runs the rest: `ls & touch x`.
+        let res = evaluate_with_policy("ls & touch example.txt", &policy(), &[], None);
+        assert_eq!(res.tier, CommandSafetyTier::Mutative);
+        assert!(res.requires_confirmation);
+    }
+
+    #[test]
+    fn build_script_runners_require_approval() {
+        // cargo check/tree/metadata execute build scripts; npx can install
+        // packages. Removed from the inert phrase list on purpose.
+        for cmd in ["cargo check", "cargo tree", "npx tsc --noEmit"] {
+            let res = evaluate_with_policy(cmd, &policy(), &[], None);
+            assert_eq!(res.tier, CommandSafetyTier::Mutative, "expected approval: {cmd}");
+            assert!(res.requires_confirmation);
         }
     }
 
@@ -163,7 +310,7 @@ mod tests {
             "echo hi >> notes.txt",
             "ls | tee listing.txt",
         ] {
-            let res = evaluate_with_policy(cmd, &policy(), &[]);
+            let res = evaluate_with_policy(cmd, &policy(), &[], None);
             assert_eq!(res.tier, CommandSafetyTier::Mutative, "expected mutative: {cmd}");
             assert!(res.requires_confirmation, "expected approval: {cmd}");
         }
@@ -179,7 +326,7 @@ mod tests {
             "touch newfile",
             "mv a b",
         ] {
-            let res = evaluate_with_policy(cmd, &policy(), &[]);
+            let res = evaluate_with_policy(cmd, &policy(), &[], None);
             assert_eq!(res.tier, CommandSafetyTier::Mutative, "expected mutative: {cmd}");
             assert!(res.requires_confirmation, "expected approval: {cmd}");
         }
@@ -187,42 +334,67 @@ mod tests {
 
     #[test]
     fn test_dangerous_commands() {
-        let res = evaluate_with_policy("rm -rf /", &policy(), &[]);
+        let res = evaluate_with_policy("rm -rf /", &policy(), &[], None);
         assert_eq!(res.tier, CommandSafetyTier::Dangerous);
         assert!(res.requires_confirmation);
     }
 
     #[test]
     fn standing_grant_allows_exact_command() {
-        let grants = vec!["cargo test".to_string(), "npm run build".to_string()];
-        let res = evaluate_with_policy("cargo test", &policy(), &grants);
+        let grants = vec![
+            StandingGrant::Simple("cargo test".to_string()),
+            StandingGrant::Simple("npm run build".to_string()),
+        ];
+        let res = evaluate_with_policy("cargo test", &policy(), &grants, None);
         assert_eq!(res.tier, CommandSafetyTier::Safe);
         assert!(!res.requires_confirmation);
         assert!(res.standing_grant);
 
         // Exact match only: arguments change it back to approval.
-        let res = evaluate_with_policy("cargo test -- --nocapture", &policy(), &grants);
+        let res = evaluate_with_policy("cargo test -- --nocapture", &policy(), &grants, None);
         assert!(res.requires_confirmation);
+
+        // Grants are case-sensitive command identities now.
+        let res = evaluate_with_policy("CARGO TEST", &policy(), &grants, None);
+        assert!(res.requires_confirmation);
+    }
+
+    #[test]
+    fn scoped_grants_are_workspace_bound() {
+        let grants = vec![StandingGrant::Scoped {
+            command: "cargo test".to_string(),
+            cwd: Some("/home/user/proj-a".to_string()),
+        }];
+        // Same cwd → granted.
+        let res = evaluate_with_policy("cargo test", &policy(), &grants, Some("/home/user/proj-a"));
+        assert!(res.standing_grant);
+        // Different project → approval.
+        let res = evaluate_with_policy("cargo test", &policy(), &grants, Some("/home/user/proj-b"));
+        assert!(!res.standing_grant);
+        assert!(res.requires_confirmation);
+        // Unknown cwd → fail closed.
+        let res = evaluate_with_policy("cargo test", &policy(), &grants, None);
+        assert!(!res.standing_grant);
     }
 
     #[test]
     fn grants_cannot_override_deny_or_compound() {
         let grants = vec![
-            "rm -rf /".to_string(),
-            "sudo apt install x".to_string(),
-            "cat a > b".to_string(),
+            StandingGrant::Simple("rm -rf /".to_string()),
+            StandingGrant::Simple("sudo apt install x".to_string()),
+            StandingGrant::Simple("cat a > b".to_string()),
         ];
         // Dangerous pattern still wins over the grant.
-        let res = evaluate_with_policy("rm -rf /", &policy(), &grants);
+        let res = evaluate_with_policy("rm -rf /", &policy(), &grants, None);
         assert_eq!(res.tier, CommandSafetyTier::Dangerous);
         assert!(res.requires_confirmation);
         // Compound syntax still wins.
-        let res = evaluate_with_policy("cat a > b", &policy(), &grants);
+        let res = evaluate_with_policy("cat a > b", &policy(), &grants, None);
         assert!(res.requires_confirmation);
         // deny_commands also beat grants.
         let mut p = policy();
         p.deny_commands = vec!["sudo".to_string()];
-        let res = evaluate_with_policy("sudo apt install x", &p, &grants);
+        let res = evaluate_with_policy("sudo apt install x", &p, &grants, None);
         assert!(res.requires_confirmation);
         assert!(!res.standing_grant);
     }
@@ -238,7 +410,7 @@ mod tests {
             allow_phrases: vec![],
         };
         // Even plain `ls` requires approval under a failed policy load.
-        let res = evaluate_with_policy("ls", &p, &[]);
+        let res = evaluate_with_policy("ls", &p, &[], None);
         assert!(res.requires_confirmation);
         assert_eq!(res.tier, CommandSafetyTier::Mutative);
     }

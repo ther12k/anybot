@@ -3,48 +3,53 @@
 @tailwind utilities;
 
 /*
- * AnyBot theme — extracted from Grok Bot (sand) v0.79.4 renderer CSS
- * (--sand-* design tokens, light theme)
+ * AnyBot theme — warm paper design system (redesign kit: UX-SPEC §4.1).
+ * Token names follow the original Grok Bot (sand) mapping so every component
+ * re-skins together; values are now paper / ink / coral / sage.
+ * Contrast notes: ink 12.8:1, coral-text 6.2:1, deep sage 5.9:1,
+ * danger-text 5.3:1 on paper — normal-size text always uses a dark variant,
+ * base coral (#D86A4F, 3.25:1) is reserved for fills and large accents.
  */
 :root {
   /* Surfaces */
-  --sand-bg-chrome: #fcfcfc;          /* main window */
-  --sand-bg-sidebar: #f5f5f5;         /* left sidebar */
+  --sand-bg-chrome: #faf8f5;          /* main window — paper */
+  --sand-bg-sidebar: #f4efe8;         /* left sidebar — warm cream */
   --sand-bg-elevated: #ffffff;        /* cards, composer */
-  --sand-bg-elevated-hover: #f1f1f1;
-  --sand-bg-hover: #1c1c1c0f;         /* 6% black */
-  --sand-bg-active: #1c1c1c14;        /* 8% black */
+  --sand-bg-elevated-hover: #f6f1ea;
+  --sand-bg-hover: #322d290f;         /* 6% ink */
+  --sand-bg-active: #322d2914;        /* 8% ink */
 
-  /* Text — alphas raised so every functional size passes 4.5:1 on chrome/sidebar
-     (Grok ships fainter steps; hierarchy keeps the same order, lighter = quieter) */
-  --sand-text-primary: #1c1c1c;
-  --sand-text-secondary: #1c1c1cd9;   /* 85% ≈ 10:1 */
-  --sand-text-tertiary: #1c1c1cbf;    /* 75% ≈ 7.3:1 */
-  --sand-text-quaternary: #1c1c1ca6;  /* 65% ≈ 4.85:1 */
+  /* Text — every functional size ≥ 4.5:1 on paper */
+  --sand-text-primary: #322d29;       /* ink — 12.8:1 */
+  --sand-text-secondary: #322d29d9;   /* 85% */
+  --sand-text-tertiary: #322d29bf;    /* 75% */
+  --sand-text-quaternary: #322d29a6;  /* 65% ≈ 4.9:1 */
   --sand-text-on-primary: #ffffff;
 
   /* Borders / strokes */
-  --sand-border-primary-translucent: #1c1c1c3d;
-  --sand-stroke-secondary: #1c1c1c1f; /* 12% */
-  --sand-stroke-tertiary: #1c1c1c14;  /* 8% */
+  --sand-border-primary-translucent: #322d2940;
+  --sand-stroke-secondary: #322d291f; /* 12% */
+  --sand-stroke-tertiary: #322d2914;  /* 8% */
 
   /* Bubbles */
-  --sand-fill-bubble-user: #1c1c1c;   /* black user bubble */
-  --sand-fill-bubble-agent: #1c1c1c0f;
+  --sand-fill-bubble-user: #322d29;   /* ink user bubble / primary controls */
+  --sand-fill-bubble-agent: #322d290f;
   --sand-transcript-prose-bubble-radius: 18px;
   --sand-conversation-bubble-max-width: 640px;
   --sand-transcript-prose-line-height: 22px;
 
-  /* Accent (blue) */
-  --sand-bg-accent-primary: #1680f3;
-  --sand-bg-accent-primary-hover: #126fd4;
-  --sand-bg-accent-bright: #1e86fc;
-  --sand-bg-accent-secondary: #1e86fc17;
+  /* Accent (coral) — DEFAULT is the text-safe dark coral; bright is fill-only */
+  --sand-bg-accent-primary: #9c402c;        /* 6.2:1 — text-safe */
+  --sand-bg-accent-primary-hover: #83361f;
+  --sand-bg-accent-bright: #d86a4f;         /* fills, large glyphs only */
+  --sand-bg-accent-secondary: #d86a4f1f;
 
-  /* Status */
-  --sand-bg-danger-primary: #e72e3b;
-  --sand-bg-danger-primary-hover: #c82532;
-  --sand-bg-green-primary: #10ab61;
+  /* Status — text-safe dark variants; fills stay recognisable */
+  --sand-bg-danger-primary: #c82532;        /* ≈5.3:1 */
+  --sand-bg-danger-primary-hover: #a91d29;
+  --sand-bg-danger-fill: #e72e3b;
+  --sand-bg-green-primary: #52644f;         /* deep sage ≈5.9:1 */
+  --sand-bg-sage-fill: #697c65;             /* decorative sage */
 
   /* Type */
   --sand-font-size-xxs: 11px;
@@ -112,14 +117,14 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1c1c1c1f;
+  background: #322d291f;
   border-radius: 9999px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #1c1c1c3d;
+  background: #322d2940;
   background-clip: content-box;
 }
 
@@ -142,7 +147,7 @@ body {
 }
 
 .transcript-prose pre {
-  background: #1c1c1c08;
+  background: #322d2908;
   border: 1px solid var(--sand-stroke-tertiary);
   border-radius: 12px;
   padding: 10px 12px;
@@ -158,7 +163,7 @@ body {
 }
 
 .transcript-prose :not(pre) > code {
-  background: #1c1c1c0f;
+  background: #322d290f;
   border-radius: 5px;
   padding: 1.5px 5px;
 }
@@ -203,7 +208,7 @@ body {
 }
 
 .transcript-prose th {
-  background: #1c1c1c08;
+  background: #322d2908;
   font-weight: 600;
 }
 

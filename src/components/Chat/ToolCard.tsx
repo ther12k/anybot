@@ -154,44 +154,75 @@ export const ToolCard: React.FC<ToolCardProps> = ({
         )}
       </div>
 
-      {/* Approval bar — Grok permission card */}
+      {/* Approval bar — permission card. write_file shows the exact proposed
+          diff above (prepared before approval) and decides Apply / Decline. */}
       {toolCall.status === "pending_approval" && (
         <div className="px-3 py-2.5 bg-hover border-t border-stroke flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-xs text-secondary min-w-0">
-            <ShieldAlert className="w-4 h-4 shrink-0 text-[#9d6937]" />
-            <span className="truncate">
-              {toolCall.safetyReason || "Allow this action?"}
-            </span>
+            <ShieldAlert className="w-4 h-4 shrink-0 text-accent" />
+            {toolCall.name === "write_file" ? (
+              <span className="truncate">
+                {toolCall.result?.diff?.existed === false
+                  ? "Creates a new file — review the proposed content."
+                  : "Proposed change — review what will be written."}
+              </span>
+            ) : (
+              <span className="truncate">
+                {toolCall.safetyReason || "Allow this action?"}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
-            <button
-              onClick={() => onReject?.(toolCall.id)}
-              className="px-2.5 py-1 text-xs font-medium text-secondary hover:text-primary bg-elevated border border-stroke hover:bg-elevatedHover rounded-lg transition-colors flex items-center gap-1"
-            >
-              <X className="w-3 h-3" />
-              Deny
-            </button>
-            {toolCall.name === "execute_shell" && onAlwaysAllow && (
-              <button
-                onClick={() => onAlwaysAllow(toolCall.id)}
-                className="px-2.5 py-1 text-xs font-medium text-secondary hover:text-primary bg-elevated border border-stroke hover:bg-elevatedHover rounded-lg transition-colors"
-                title="Always allow this exact command in the future (creates a standing grant)"
-              >
-                Always allow
-              </button>
+            {toolCall.name === "write_file" ? (
+              <>
+                <button
+                  onClick={() => onReject?.(toolCall.id)}
+                  className="px-2.5 py-1 text-xs font-medium text-secondary hover:text-primary bg-elevated border border-stroke hover:bg-elevatedHover rounded-lg transition-colors flex items-center gap-1"
+                >
+                  <X className="w-3 h-3" />
+                  Decline
+                </button>
+                <button
+                  onClick={() => onApprove?.(toolCall.id)}
+                  className="px-3 py-1 text-xs font-medium text-white bg-bubbleUser hover:bg-[#3d3733] rounded-lg transition-colors flex items-center gap-1.5"
+                  title="Apply exactly this reviewed change"
+                >
+                  <Play className="w-3 h-3 fill-current" />
+                  Apply change
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => onReject?.(toolCall.id)}
+                  className="px-2.5 py-1 text-xs font-medium text-secondary hover:text-primary bg-elevated border border-stroke hover:bg-elevatedHover rounded-lg transition-colors flex items-center gap-1"
+                >
+                  <X className="w-3 h-3" />
+                  Deny
+                </button>
+                {toolCall.name === "execute_shell" && onAlwaysAllow && (
+                  <button
+                    onClick={() => onAlwaysAllow(toolCall.id)}
+                    className="px-2.5 py-1 text-xs font-medium text-secondary hover:text-primary bg-elevated border border-stroke hover:bg-elevatedHover rounded-lg transition-colors"
+                    title="Always allow this exact command in this workspace (creates a standing grant)"
+                  >
+                    Always allow
+                  </button>
+                )}
+                <button
+                  onClick={() => onApprove?.(toolCall.id)}
+                  className="px-3 py-1 text-xs font-medium text-white bg-bubbleUser hover:bg-[#3d3733] rounded-lg transition-colors flex items-center gap-1.5"
+                >
+                  <Play className="w-3 h-3 fill-current" />
+                  Approve
+                </button>
+              </>
             )}
-            <button
-              onClick={() => onApprove?.(toolCall.id)}
-              className="px-3 py-1 text-xs font-medium text-white bg-bubbleUser hover:bg-[#333] rounded-lg transition-colors flex items-center gap-1.5"
-            >
-              <Play className="w-3 h-3 fill-current" />
-              Approve
-            </button>
           </div>
         </div>
       )}
 
-      {/* Diff for write_file */}
+      {/* Proposed or applied diff for write_file */}
       {toolCall.result?.diff && (
         <DiffViewer
           before={toolCall.result.diff.before}
@@ -200,8 +231,17 @@ export const ToolCard: React.FC<ToolCardProps> = ({
         />
       )}
 
+      {/* Failure reason strip — shown even when a diff is present (e.g. a
+          stale proposal that was refused instead of overwriting) */}
+      {toolCall.result?.error && toolCall.status !== "pending_approval" && (
+        <div className="px-3 py-2 bg-chrome border-t border-stroke text-xs text-danger flex items-start gap-1.5">
+          <XCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span className="select-text">{toolCall.result.error}</span>
+        </div>
+      )}
+
       {/* Output */}
-      {toolCall.result && !toolCall.result.diff && (toolCall.result.output || toolCall.result.error) && (
+      {toolCall.result && !toolCall.result.diff && toolCall.result.output && (
         <div className="border-t border-stroke">
           <button
             onClick={() => setIsOutputExpanded(!isOutputExpanded)}
@@ -215,12 +255,8 @@ export const ToolCard: React.FC<ToolCardProps> = ({
             )}
           </button>
           {isOutputExpanded && (
-            <pre
-              className={`px-3 py-2 bg-chrome text-xxs font-mono max-h-44 overflow-y-auto whitespace-pre-wrap select-text ${
-                toolCall.result.error ? "text-danger" : "text-tertiary"
-              }`}
-            >
-              {toolCall.result.output || toolCall.result.error}
+            <pre className="px-3 py-2 bg-chrome text-xxs font-mono max-h-44 overflow-y-auto whitespace-pre-wrap select-text text-tertiary">
+              {toolCall.result.output}
             </pre>
           )}
         </div>

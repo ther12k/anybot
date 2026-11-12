@@ -91,10 +91,13 @@ fn default_git_read_only() -> Vec<String> {
 }
 
 fn default_phrases() -> Vec<String> {
+    // Only truly inert version/listing phrases. Note what is deliberately
+    // ABSENT: `cargo check`/`tree`/`metadata` execute build scripts and hit
+    // the network; `npx <pkg>` can install and run arbitrary lifecycle
+    // scripts. Those are mutative and require approval.
     [
-        "cargo --version", "cargo check", "cargo tree", "cargo metadata",
-        "rustc --version", "node -v", "node --version", "npm -v",
-        "npm --version", "npm ls", "npm list", "npx tsc --noEmit",
+        "cargo --version", "rustc --version", "node -v", "node --version",
+        "npm -v", "npm --version", "npm ls", "npm list",
         "tsc --noEmit", "python --version", "python3 --version",
         "pip --version", "pip3 --version", "git --version", "go version",
         "java --version", "make --version", "cmake --version",
@@ -105,11 +108,12 @@ fn default_phrases() -> Vec<String> {
     .collect()
 }
 
-/// Shell syntax that compounds or redirects a command. Static, not policy
-/// data: `pwd && touch x` must never inherit a safe prefix regardless of
-/// what the config allows.
+/// Shell syntax that compounds, redirects, or backgrounds a command. Static,
+/// not policy data: `pwd && touch x` — or `ls & touch x` (bare `&` runs the
+/// rest as a background job) — must never inherit a safe prefix regardless
+/// of what the config allows.
 pub const COMPOUND_MARKERS: &[&str] = &[
-    ";", "&&", "||", "|", "`", "$(", ">", ">>", "<", "<<", "\n", "\r",
+    ";", "&&", "||", "&", "|", "`", "$(", ">", ">>", "<", "<<", "\n", "\r",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,7 +152,23 @@ pub fn load_policy() -> Policy {
     }
 }
 
-pub fn load_standing_grants_sync() -> Vec<String> {
+/// A standing grant ("Always allow"). Grants are case-sensitive exact command
+/// identities, optionally scoped to one working directory so a grant earned
+/// in one project cannot auto-run the same text elsewhere.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StandingGrant {
+    /// Legacy plain-string grant (matches any working directory).
+    Simple(String),
+    /// Grant scoped to an exact working directory.
+    Scoped {
+        command: String,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+}
+
+pub fn load_standing_grants_sync() -> Vec<StandingGrant> {
     std::fs::read_to_string(grants_path())
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -156,12 +176,12 @@ pub fn load_standing_grants_sync() -> Vec<String> {
 }
 
 #[tauri::command]
-pub async fn load_standing_grants() -> Result<Vec<String>, String> {
+pub async fn load_standing_grants() -> Result<Vec<StandingGrant>, String> {
     Ok(load_standing_grants_sync())
 }
 
 #[tauri::command]
-pub async fn save_standing_grants(grants: Vec<String>) -> Result<bool, String> {
+pub async fn save_standing_grants(grants: Vec<StandingGrant>) -> Result<bool, String> {
     let path = grants_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;

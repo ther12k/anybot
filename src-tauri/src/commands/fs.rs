@@ -4,12 +4,31 @@ use tokio::io::AsyncWriteExt;
 use crate::models::{DirEntryInfo, FileReadResult, FileWriteResult, SystemInfo};
 use crate::policy::audit;
 
+fn audit_fs(tool: &str, outcome: &str, path: &str, decision: &str, error: Option<&str>) {
+    audit(serde_json::json!({
+        "tool": tool,
+        "decision": decision,
+        "outcome": outcome,
+        "path": path,
+        "error": error,
+    }));
+}
+
 #[tauri::command]
 pub async fn read_file_content(
     path: String,
     max_lines: Option<usize>,
 ) -> Result<FileReadResult, String> {
-    let p = Path::new(&path);
+    let result = read_file_inner(&path, max_lines).await;
+    match &result {
+        Ok(_) => audit_fs("read_file", "completed", &path, "auto_safe", None),
+        Err(e) => audit_fs("read_file", "failed", &path, "auto_safe", Some(e)),
+    }
+    result
+}
+
+async fn read_file_inner(path: &str, max_lines: Option<usize>) -> Result<FileReadResult, String> {
+    let p = Path::new(path);
     if !p.exists() {
         return Err(format!("File does not exist: {path}"));
     }
@@ -44,8 +63,41 @@ pub async fn write_file_content(
     content: String,
     decision: Option<String>,
 ) -> Result<FileWriteResult, String> {
-    let p = Path::new(&path);
-    let decision = decision.unwrap_or_else(|| "approved".to_string());
+    // Trust boundary: a write without a recorded "approved" decision is
+    // refused at the native layer, not defaulted to approved.
+    let decision = match decision.as_deref() {
+        Some("approved") => "approved",
+        _ => {
+            audit_fs(
+                "write_file",
+                "blocked",
+                &path,
+                decision.as_deref().unwrap_or("none"),
+                Some("write without recorded approval"),
+            );
+            return Err(
+                "Blocked by policy: file writes require a recorded user approval decision."
+                    .to_string(),
+            );
+        }
+    };
+
+    let result = write_file_inner(&path, &content).await;
+    match &result {
+        Ok(r) => audit(serde_json::json!({
+            "tool": "write_file",
+            "decision": decision,
+            "outcome": "completed",
+            "path": r.path,
+            "size_bytes": r.size_bytes,
+        })),
+        Err(e) => audit_fs("write_file", "failed", &path, decision, Some(e)),
+    }
+    result
+}
+
+async fn write_file_inner(path: &str, content: &str) -> Result<FileWriteResult, String> {
+    let p = Path::new(path);
 
     // Create parent directories if missing
     if let Some(parent) = p.parent() {
@@ -56,23 +108,19 @@ pub async fn write_file_content(
 
     // Atomic write: write to temp file then rename
     let tmp_path = format!("{path}.tmp.{}", std::process::id());
-    let mut file = fs::File::create(&tmp_path).await.map_err(|e| e.to_string())?;
-    file.write_all(content.as_bytes()).await.map_err(|e| e.to_string())?;
-    file.sync_all().await.map_err(|e| e.to_string())?;
-    drop(file);
+    let file_result: Result<(), String> = async {
+        let mut file = fs::File::create(&tmp_path).await.map_err(|e| e.to_string())?;
+        file.write_all(content.as_bytes()).await.map_err(|e| e.to_string())?;
+        file.sync_all().await.map_err(|e| e.to_string())?;
+        drop(file);
+        fs::rename(&tmp_path, p).await.map_err(|e| e.to_string())
+    }
+    .await;
 
-    fs::rename(&tmp_path, p).await.map_err(|e| e.to_string())?;
-
-    audit(serde_json::json!({
-        "tool": "write_file",
-        "decision": decision,
-        "outcome": "completed",
-        "path": p.display().to_string(),
-        "size_bytes": content.len(),
-    }));
+    file_result?;
 
     Ok(FileWriteResult {
-        path,
+        path: path.to_string(),
         success: true,
         size_bytes: content.len(),
     })
@@ -80,7 +128,22 @@ pub async fn write_file_content(
 
 #[tauri::command]
 pub async fn list_dir_entries(path: String) -> Result<Vec<DirEntryInfo>, String> {
-    let p = Path::new(&path);
+    let result = list_dir_inner(&path).await;
+    match &result {
+        Ok(entries) => audit(serde_json::json!({
+            "tool": "list_directory",
+            "decision": "auto_safe",
+            "outcome": "completed",
+            "path": path,
+            "entry_count": entries.len(),
+        })),
+        Err(e) => audit_fs("list_directory", "failed", &path, "auto_safe", Some(e)),
+    }
+    result
+}
+
+async fn list_dir_inner(path: &str) -> Result<Vec<DirEntryInfo>, String> {
+    let p = Path::new(path);
     if !p.exists() {
         return Err(format!("Directory does not exist: {path}"));
     }
