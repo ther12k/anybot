@@ -127,10 +127,11 @@ Click the **gear icon** in the sidebar to configure:
 * **xAI (Grok) API key** — Grok 2 / Grok Beta. Each provider only ever receives its own key.
 * **Ollama endpoint** — local models at `http://localhost:11434` by default. Availability is checked when you send, not assumed from a saved URL.
 
-⚠️ **Keys are stored in plain text** at `~/.config/anybot/config.json` (mode depends on your umask). Protect your user account accordingly; OS keychain encryption is planned.
+🔒 **Credentials are secured by OS Keychain encryption**:
+API keys are stored securely in your operating system's native secret service (GNOME Keyring / KWallet via D-Bus on Linux, Windows Credential Manager on Windows, or Apple Keychain on macOS). Non-sensitive settings in `~/.config/anybot/config.json` have their keys scrubbed and replaced with keychain placeholders, and the file is restricted to owner permissions (`0600`). Legacy installations with plain text keys are automatically migrated into the keychain on startup.
 
 ## 🧪 Verification status
 
-* 28 Rust tests cover the classifier (mutative git forms, background `&`, zero-arg commands, scoped grants, fail-closed corruption), executor (kill stops `sleep 30` <5s, timeout terminates group), and native proposal registry (immutable proposal creation, approval status transitions, single-use token consumption, content tampering rejection, and disk conflict detection).
+* 30 Rust tests cover the classifier (mutative git forms, background `&`, zero-arg commands, scoped grants, fail-closed corruption), executor (kill stops `sleep 30` <5s, timeout terminates group), native proposal registry (immutable proposal creation, approval status transitions, single-use token consumption, content tampering rejection, and disk conflict detection), and secure vault storage (keyring API and 0600 file permission enforcement).
 * TypeScript strict-clean; production build passes.
 * Not yet verified: Windows descendant kill, packaged installers, live provider contracts with real credentials.

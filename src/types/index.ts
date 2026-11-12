@@ -98,4 +98,6 @@ export interface VaultConfig {
   selectedModel?: string;
   theme?: "dark" | "light";
   autoApproveSafeTools?: boolean;
+  /** True when credentials are encrypted in OS Keychain (SecretService/KWallet/macOS Keychain/Windows Credential Manager). */
+  keychainStorageActive?: boolean;
 }

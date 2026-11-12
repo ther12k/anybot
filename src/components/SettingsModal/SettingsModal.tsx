@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { X, Key, Shield, HardDrive, Check, ExternalLink, Loader2 } from "lucide-react";
+import { X, Key, Shield, ShieldCheck, HardDrive, Check, ExternalLink, Loader2 } from "lucide-react";
 import { VaultConfig } from "../../types";
 
 interface SettingsModalProps {
@@ -125,6 +125,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Content */}
         <div className="p-5 space-y-4 text-xs max-h-[70vh] overflow-y-auto overscroll-contain">
+          {/* OS Keychain status indicator */}
+          <div className="px-3 py-2 rounded-xl bg-sidebar border border-stroke flex items-center justify-between text-xxs">
+            <div className="flex items-center gap-2 text-secondary">
+              <ShieldCheck className="w-4 h-4 text-success shrink-0" aria-hidden="true" />
+              <span>
+                {vault.keychainStorageActive !== false
+                  ? "Protected by OS Keychain (GNOME Keyring / macOS / Windows)"
+                  : "Protected file storage (mode 0600, restricted to owner)"}
+              </span>
+            </div>
+            <span className="text-quaternary font-mono">mode: 0600</span>
+          </div>
+
           {/* Anthropic */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
