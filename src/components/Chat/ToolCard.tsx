@@ -12,6 +12,7 @@ import {
   ShieldAlert,
   Play,
   X,
+  Users,
 } from "lucide-react";
 import { ToolCallItem } from "../../types";
 import { DiffViewer } from "./DiffViewer";
@@ -46,6 +47,11 @@ const TOOL_META: Record<
     label: "Browsing files",
     icon: <Folder className="w-3.5 h-3.5" />,
     statusText: "List",
+  },
+  delegate_task: {
+    label: "Delegating to another bot",
+    icon: <Users className="w-3.5 h-3.5" />,
+    statusText: "Handoff",
   },
 };
 
@@ -150,6 +156,21 @@ export const ToolCard: React.FC<ToolCardProps> = ({
           <div className="text-tertiary">
             <span className="select-none">dir: </span>
             <span className="text-primary">{toolCall.arguments.path}</span>
+          </div>
+        )}
+        {toolCall.name === "delegate_task" && (
+          <div className="space-y-1">
+            <div className="text-tertiary">
+              <span className="select-none">to: </span>
+              <span className="text-primary">{toolCall.arguments.bot}</span>
+            </div>
+            <div className="text-tertiary break-words">
+              <span className="select-none">task: </span>
+              <span className="text-primary">
+                {String(toolCall.arguments.task || "").slice(0, 200)}
+                {String(toolCall.arguments.task || "").length > 200 ? "…" : ""}
+              </span>
+            </div>
           </div>
         )}
       </div>

@@ -48,9 +48,19 @@ async function safeInvoke<T>(cmd: string, args: Record<string, any> = {}): Promi
     localStorage.setItem("anybot_grants", JSON.stringify(args.grants || []));
     return true as unknown as T;
   }
-  if (cmd === "audit_event") {
-    console.info("[audit]", args.event);
+  if (cmd === "record_rejection_audit" || cmd === "record_delegation_audit") {
+    console.info("[audit]", cmd, args);
     return true as unknown as T;
+  }
+  if (cmd === "verify_audit_log") {
+    return {
+      total_rows: 0,
+      hashed_rows: 0,
+      legacy_rows: 0,
+      valid: true,
+      first_break: null,
+      tip_hash: null,
+    } as unknown as T;
   }
   if (cmd === "execute_shell_command") {
     return {
@@ -202,9 +212,39 @@ export const TauriBridge = {
     return safeInvoke("save_standing_grants", { grants });
   },
 
-  /** Record a governance event that never reaches execution (rejections). */
-  auditEvent: async (event: Record<string, unknown>): Promise<boolean> => {
-    return safeInvoke("audit_event", { event: JSON.stringify(event) });
+  /** Record a governance decision that never reaches execution (a rejection
+   *  or a Stop-cancelled approval). Typed natively — the renderer reports
+   *  what it decided, it cannot forge arbitrary audit rows. */
+  recordRejectionAudit: async (
+    tool: string,
+    outcome: "rejected" | "cancelled",
+    command?: string | null,
+    path?: string | null
+  ): Promise<boolean> => {
+    return safeInvoke("record_rejection_audit", { tool, outcome, command, path });
+  },
+
+  /** Record a bot-to-bot delegation in the hash-chained audit log. */
+  recordDelegationAudit: async (
+    fromBot: string,
+    toBot: string,
+    toModel: string,
+    outcome: "completed" | "failed" | "cancelled",
+    error?: string | null
+  ): Promise<boolean> => {
+    return safeInvoke("record_delegation_audit", { fromBot, toBot, toModel, outcome, error });
+  },
+
+  /** Walk the audit log's hash chain and report whether it is intact. */
+  verifyAuditLog: async (): Promise<{
+    total_rows: number;
+    hashed_rows: number;
+    legacy_rows: number;
+    valid: boolean;
+    first_break: number | null;
+    tip_hash: string | null;
+  }> => {
+    return safeInvoke("verify_audit_log");
   },
 
   readFileContent: async (

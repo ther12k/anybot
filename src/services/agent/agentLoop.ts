@@ -30,6 +30,17 @@ interface RunContext {
 /** Honest terminal outcome of a whole run chain. */
 export type RunOutcome = "completed" | "cancelled" | "failed";
 
+/** Result of a bot-to-bot delegation sub-run (no tools, single reply). */
+export interface DelegateResult {
+  ok: boolean;
+  /** Display name of the target bot (set when the bot was found). */
+  botName?: string;
+  /** Model the sub-run actually used. */
+  modelUsed?: string;
+  reply?: string;
+  error?: string;
+}
+
 /** The system working directory, resolved once and reused so safety checks,
  *  executions, and "Always allow" grants all agree on the same workspace. */
 let cachedSystemCwd: string | null = null;
@@ -47,6 +58,13 @@ async function resolveCwd(explicit?: string): Promise<string | undefined> {
 
 export class AgentLoop {
   private activeRun: RunContext | null = null;
+
+  /** Bot-to-bot delegation. Assigned by the app so the resolver always sees
+   *  the current bot roster, vault keys, and selected model. The sub-run it
+   *  performs is a pure chat completion (includeTools: false). */
+  public delegateResolver:
+    | ((botRef: string, task: string, signal: AbortSignal) => Promise<DelegateResult>)
+    | null = null;
 
   /** True while a run has not fully settled (Stop requested but pending). */
   public isBusy(): boolean {
@@ -369,6 +387,14 @@ export class AgentLoop {
       safetyReason = "Modifies filesystem content";
       // Auto-approve covers read-only commands; writes always ask.
       requiresApproval = true;
+    } else if (toolCall.name === "delegate_task") {
+      // Delegation is a model-to-model call: the sub-bot runs with NO tool
+      // surface (see StreamOptions.includeTools), so it can neither mutate
+      // this machine nor recurse into further delegations. No proposal, no
+      // approval — there is nothing local to approve.
+      safetyTier = "Safe";
+      safetyReason = "Bot-to-bot chat only — no tool access in the sub-run";
+      requiresApproval = false;
     }
 
     toolCall.safetyTier = safetyTier;
@@ -465,13 +491,13 @@ export class AgentLoop {
         };
         onUpdate(toolCall);
         // Rejections never reach the execution layer; audit them here.
-        TauriBridge.auditEvent({
-          tool: toolCall.name,
-          decision: "rejected",
-          outcome: "rejected",
-          command: toolCall.arguments.command ?? null,
-          path: toolCall.arguments.path ?? null,
-        }).catch(() => {});
+        // Typed command: the renderer reports its decision, not row content.
+        TauriBridge.recordRejectionAudit(
+          toolCall.name,
+          run.aborted ? "cancelled" : "rejected",
+          toolCall.arguments.command ?? null,
+          toolCall.arguments.path ?? null
+        ).catch(() => {});
         return;
       }
 
@@ -562,12 +588,46 @@ export class AgentLoop {
             .map((e) => `${e.is_dir ? "📁" : "📄"} ${e.name} (${e.size} bytes)`)
             .join("\n"),
         };
+      } else if (toolCall.name === "delegate_task") {
+        if (!this.delegateResolver) {
+          toolCall.status = "failed";
+          toolCall.result = { error: "Delegation is unavailable." };
+        } else {
+          const res = await this.delegateResolver(
+            String(toolCall.arguments.bot || ""),
+            String(toolCall.arguments.task || ""),
+            run.controller.signal
+          );
+          if (run.aborted) {
+            toolCall.status = "rejected";
+            toolCall.result = { error: "Cancelled by user (Stop)." };
+          } else if (!res.ok) {
+            toolCall.status = "failed";
+            toolCall.result = { error: res.error || "Delegation failed." };
+          } else {
+            toolCall.status = "completed";
+            // The reply is the tool result the delegating model reads next.
+            const reply = res.reply || "";
+            toolCall.result = {
+              output:
+                `[${res.botName} replied on ${res.modelUsed}]\n\n` +
+                (reply.length > 12_000
+                  ? reply.slice(0, 12_000) + "\n\n[reply truncated]"
+                  : reply),
+            };
+          }
+        }
       }
     } catch (err: any) {
-      toolCall.status = "failed";
-      toolCall.result = {
-        error: err.message || String(err),
-      };
+      if (run.aborted) {
+        toolCall.status = "rejected";
+        toolCall.result = { error: "Cancelled by user (Stop). Nothing was executed." };
+      } else {
+        toolCall.status = "failed";
+        toolCall.result = {
+          error: err.message || String(err),
+        };
+      }
     }
 
     onUpdate(toolCall);

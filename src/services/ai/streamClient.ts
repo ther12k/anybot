@@ -17,6 +17,14 @@ export interface ChatMessagePayload {
   tool_calls?: any[];
 }
 
+/** Per-call stream options. */
+export interface StreamOptions {
+  /** False for sub-agent turns (delegation): the sub-run must stay a pure
+   *  chat completion with no tool surface, so it can never mutate anything
+   *  or recurse. Defaults to true. */
+  includeTools?: boolean;
+}
+
 /**
  * Inactivity watchdog for streaming reads. WebKitGTK (and some proxies) can
  * leave `reader.read()` pending forever after the server closes a chunked
@@ -58,16 +66,18 @@ export async function streamChatCompletion(
   systemPrompt: string,
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
-  temperature?: number
+  temperature?: number,
+  opts?: StreamOptions
 ): Promise<void> {
+  const includeTools = opts?.includeTools !== false;
   try {
     if (model.provider === "anthropic") {
-      await streamAnthropic(model, vault, messages, systemPrompt, callbacks, signal, temperature);
+      await streamAnthropic(model, vault, messages, systemPrompt, callbacks, signal, temperature, includeTools);
     } else if (model.provider === "ollama") {
-      await streamOllama(model, vault, messages, systemPrompt, callbacks, signal, temperature);
+      await streamOllama(model, vault, messages, systemPrompt, callbacks, signal, temperature, includeTools);
     } else {
       // OpenAI or Grok (xAI uses OpenAI-compatible API format)
-      await streamOpenAI(model, vault, messages, systemPrompt, callbacks, signal, temperature);
+      await streamOpenAI(model, vault, messages, systemPrompt, callbacks, signal, temperature, includeTools);
     }
   } catch (err: any) {
     if (signal?.aborted) return;
@@ -96,7 +106,8 @@ async function streamAnthropic(
   systemPrompt: string,
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
-  temperature?: number
+  temperature?: number,
+  includeTools = true
 ) {
   const apiKey = vault.anthropicApiKey?.trim();
   if (!apiKey) {
@@ -155,9 +166,11 @@ async function streamAnthropic(
     max_tokens: 4096,
     system: systemPrompt,
     messages: anthropicMessages,
-    tools: ANTHROPIC_TOOLS,
     stream: true,
   };
+  if (includeTools) {
+    payload.tools = ANTHROPIC_TOOLS;
+  }
 
   if (model.supportsThinking) {
     payload.thinking = {
@@ -293,7 +306,8 @@ async function streamOpenAI(
   systemPrompt: string,
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
-  temperature?: number
+  temperature?: number,
+  includeTools = true
 ) {
   const isGrok = model.provider === "grok";
   // Each provider only ever gets its own credential — never fall back to
@@ -332,9 +346,11 @@ async function streamOpenAI(
   const payload: any = {
     model: model.id,
     messages: formattedMessages,
-    tools: OPENAI_TOOLS,
     stream: true,
   };
+  if (includeTools) {
+    payload.tools = OPENAI_TOOLS;
+  }
   if (typeof temperature === "number") {
     payload.temperature = temperature;
   }
@@ -473,7 +489,8 @@ async function streamOllama(
   systemPrompt: string,
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
-  temperature?: number
+  temperature?: number,
+  includeTools = true
 ) {
   const baseUrl = (vault.ollamaBaseUrl?.trim() || "http://localhost:11434").replace(/\/$/, "");
 
@@ -515,7 +532,7 @@ async function streamOllama(
     messages: formattedMessages,
     stream: true,
   };
-  if (model.supportsTools) {
+  if (model.supportsTools && includeTools) {
     payload.tools = OPENAI_TOOLS;
   }
   if (typeof temperature === "number") {

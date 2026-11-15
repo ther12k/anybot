@@ -9,7 +9,8 @@ import { AnyBotCharacter, type TaviMood } from "./components/Tavi/AnyBotCharacte
 import { DEFAULT_BOTS } from "./data/defaultBots";
 import { DEFAULT_WORKFLOWS } from "./data/defaultWorkflows";
 import { AVAILABLE_MODELS } from "./services/ai/models";
-import { AgentLoop, type RunOutcome } from "./services/agent/agentLoop";
+import { AgentLoop, type RunOutcome, type DelegateResult } from "./services/agent/agentLoop";
+import { streamChatCompletion } from "./services/ai/streamClient";
 import { TauriBridge } from "./services/tauri/bridge";
 import {
   BotPersona,
@@ -470,6 +471,89 @@ export const App: React.FC = () => {
     handleSelectBot(newCustomBot);
     setIsBotDrawerOpen(true);
   };
+
+  /** Bot-to-bot delegation: the target persona answers in ONE tool-less
+   *  chat turn — it can neither touch this machine nor delegate further.
+   *  The persona's default model is used when its provider has a key;
+   *  otherwise the sub-run falls back to the conversation's model. */
+  const handleDelegateTask = async (
+    botRef: string,
+    task: string,
+    signal: AbortSignal
+  ): Promise<DelegateResult> => {
+    const key = botRef.trim().toLowerCase();
+    const target = bots.find(
+      (b) => b.slug.toLowerCase() === key || b.name.toLowerCase() === key
+    );
+    if (!target) {
+      return {
+        ok: false,
+        error: `Unknown bot "${botRef}". Available bots: ${bots.map((b) => b.name).join(", ")}.`,
+      };
+    }
+    // The delegator is the bot THIS thread runs on, not whatever persona is
+    // currently highlighted in the sidebar.
+    const threadBotId = threads.find((t) => t.id === activeThreadId)?.botId ?? activeBot.id;
+    const fromBot = bots.find((b) => b.id === threadBotId) ?? activeBot;
+    if (target.id === fromBot.id) {
+      return { ok: false, error: `You are already ${target.name} — answer this yourself.` };
+    }
+    if (!task.trim()) {
+      return { ok: false, error: "Delegation task is empty." };
+    }
+
+    const hasKey = (m: AIModel) =>
+      m.provider === "ollama" ||
+      (m.provider === "anthropic" && !!vault.anthropicApiKey?.trim()) ||
+      (m.provider === "openai" && !!vault.openaiApiKey?.trim()) ||
+      (m.provider === "grok" && !!vault.grokApiKey?.trim());
+    const preferred = AVAILABLE_MODELS.find((m) => m.id === target.defaultModel && hasKey(m));
+    const model = preferred ?? selectedModel;
+
+    const audit = (outcome: "completed" | "failed" | "cancelled", error?: string) =>
+      TauriBridge.recordDelegationAudit(
+        fromBot.name,
+        target.name,
+        model.name,
+        outcome,
+        error ?? null
+      ).catch(() => {});
+
+    let reply = "";
+    try {
+      await streamChatCompletion(
+        model,
+        vault,
+        [{ role: "user", content: task }],
+        target.systemPrompt,
+        { onContentDelta: (delta) => { reply += delta; } },
+        signal,
+        target.temperature,
+        { includeTools: false }
+      );
+    } catch (err: any) {
+      const cancelled = signal.aborted;
+      audit(cancelled ? "cancelled" : "failed", String(err?.message ?? err).slice(0, 300));
+      return {
+        ok: false,
+        botName: target.name,
+        modelUsed: model.name,
+        error: cancelled ? "Cancelled by user (Stop)." : String(err?.message ?? err),
+      };
+    }
+    if (signal.aborted) {
+      audit("cancelled");
+      return { ok: false, botName: target.name, modelUsed: model.name, error: "Cancelled by user (Stop)." };
+    }
+    audit("completed");
+    return { ok: true, botName: target.name, modelUsed: model.name, reply: reply.trim() };
+  };
+
+  // Keep the resolver current: it closes over the latest roster, keys, and
+  // model, so a delegation mid-conversation never uses stale state.
+  useEffect(() => {
+    agentLoopRef.current.delegateResolver = handleDelegateTask;
+  });
 
   const handleSendMessage = async (text: string): Promise<RunOutcome | null> => {
     // Concurrency policy: one run at a time. Sending during an active or

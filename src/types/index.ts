@@ -24,7 +24,7 @@ export interface CommandSafetyResult {
 
 export interface ToolCallItem {
   id: string;
-  name: "execute_shell" | "read_file" | "write_file" | "list_directory";
+  name: "execute_shell" | "read_file" | "write_file" | "list_directory" | "delegate_task";
   arguments: Record<string, any>;
   status: "pending_approval" | "running" | "completed" | "failed" | "rejected";
   safetyTier?: CommandSafetyTier;

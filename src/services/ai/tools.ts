@@ -67,6 +67,26 @@ export const TOOL_DEFINITIONS = [
       required: ["path"],
     },
   },
+  {
+    name: "delegate_task",
+    description:
+      "Delegate a self-contained task to another bot persona on the roster (e.g. the security reviewer, the researcher). The other bot answers in ONE reply with no tool access of its own; its answer comes back as this tool's result. Use it for second opinions or persona-specific expertise. The task text must be complete and standalone — the other bot sees nothing else of this conversation.",
+    parameters: {
+      type: "object",
+      properties: {
+        bot: {
+          type: "string",
+          description:
+            "Name or slug of the target bot, e.g. 'PR Reviewer & SecOps' or 'pr-reviewer'.",
+        },
+        task: {
+          type: "string",
+          description: "The complete, self-contained task for that bot.",
+        },
+      },
+      required: ["bot", "task"],
+    },
+  },
 ];
 
 // Format for Anthropic Tools API

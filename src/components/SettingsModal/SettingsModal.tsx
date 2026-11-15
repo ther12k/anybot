@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
-import { X, Key, Shield, ShieldCheck, HardDrive, Check, ExternalLink, Loader2 } from "lucide-react";
+import { X, Key, Shield, ShieldCheck, HardDrive, Check, ExternalLink, Loader2, ScrollText } from "lucide-react";
 import { VaultConfig } from "../../types";
+import { TauriBridge } from "../../services/tauri/bridge";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -24,6 +25,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [autoApproveSafeTools, setAutoApproveSafeTools] = useState(true);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [auditCheck, setAuditCheck] = useState<
+    | { state: "idle" }
+    | { state: "checking" }
+    | { state: "done"; valid: boolean; hashed: number; legacy: number; firstBreak: number | null }
+    | { state: "error"; message: string }
+  >({ state: "idle" });
 
   const dialogRef = useRef<HTMLDialogElement>(null);
 
@@ -136,6 +143,58 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </span>
             </div>
             <span className="text-quaternary font-mono">mode: 0600</span>
+          </div>
+
+          {/* Hash-chained audit log verification */}
+          <div className="px-3 py-2 rounded-xl bg-sidebar border border-stroke flex items-center justify-between gap-2 text-xxs">
+            <div className="flex items-center gap-2 text-secondary min-w-0">
+              <ScrollText className="w-4 h-4 text-accent shrink-0" aria-hidden="true" />
+              {auditCheck.state === "done" ? (
+                auditCheck.valid ? (
+                  <span className="truncate">
+                    Audit chain intact — {auditCheck.hashed} verified row
+                    {auditCheck.hashed === 1 ? "" : "s"}
+                    {auditCheck.legacy > 0 ? ` (+${auditCheck.legacy} pre-chain)` : ""}
+                  </span>
+                ) : (
+                  <span className="text-danger truncate">
+                    Audit chain BROKEN at row {auditCheck.firstBreak ?? "?"} — the log was
+                    modified after the fact.
+                  </span>
+                )
+              ) : auditCheck.state === "error" ? (
+                <span className="text-danger truncate">{auditCheck.message}</span>
+              ) : (
+                <span className="truncate">
+                  Tamper-evident audit log (each row hashes the previous one)
+                </span>
+              )}
+            </div>
+            <button
+              onClick={async () => {
+                setAuditCheck({ state: "checking" });
+                try {
+                  const v = await TauriBridge.verifyAuditLog();
+                  setAuditCheck({
+                    state: "done",
+                    valid: v.valid,
+                    hashed: v.hashed_rows,
+                    legacy: v.legacy_rows,
+                    firstBreak: v.first_break,
+                  });
+                } catch (e: any) {
+                  setAuditCheck({ state: "error", message: String(e?.message ?? e) });
+                }
+              }}
+              disabled={auditCheck.state === "checking"}
+              className="shrink-0 px-2 py-1 rounded-lg bg-chrome border border-stroke text-secondary hover:bg-hover hover:text-primary transition-colors font-medium disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {auditCheck.state === "checking" ? (
+                <Loader2 className="w-3 h-3 motion-safe:animate-spin" aria-hidden="true" />
+              ) : (
+                "Verify"
+              )}
+            </button>
           </div>
 
           {/* Anthropic */}
