@@ -42,6 +42,16 @@ export const AVAILABLE_MODELS: AIModel[] = [
     isByop: true,
     agentEngine: "zcode",
   },
+  {
+    id: "byop-agy",
+    name: "Antigravity agy (Google, Subscription)",
+    provider: "acp",
+    contextWindow: 128000,
+    supportsThinking: true,
+    supportsTools: true,
+    isByop: true,
+    agentEngine: "agy",
+  },
 
   // Anthropic Claude (BYOK API Key)
   {

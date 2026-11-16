@@ -159,6 +159,24 @@ pub async fn detect_agent_clis() -> Result<Vec<DetectedAgentCli>, String> {
         protocol: "acp-jsonrpc".to_string(),
     });
 
+    // 5. Antigravity CLI (agy)
+    let agy_path = find_binary("agy");
+    let (agy_installed, agy_ver) = if let Some(ref p) = agy_path {
+        let ver = query_version(p, "--version").await;
+        (true, ver)
+    } else {
+        (false, None)
+    };
+    results.push(DetectedAgentCli {
+        engine: "agy".to_string(),
+        name: "Antigravity (agy)".to_string(),
+        binary: "agy".to_string(),
+        path: agy_path.map(|p| p.to_string_lossy().to_string()),
+        is_installed: agy_installed,
+        version: agy_ver,
+        protocol: "acp-stdio".to_string(),
+    });
+
     Ok(results)
 }
 
@@ -344,6 +362,12 @@ pub async fn run_acp_prompt(
             // ZCode non-interactive batch/prompt mode
             cmd.arg("--prompt").arg(&prompt);
         }
+        "agy" => {
+            // Antigravity CLI print mode with stream-json format
+            cmd.arg("-p")
+                .arg(&prompt)
+                .arg("--output-format=stream-json");
+        }
         _ => {
             // Generic fallback
             cmd.arg("-p").arg(&prompt);
@@ -503,5 +527,21 @@ mod tests {
         let event = parse_acp_line("sess_1", raw).expect("should parse fallback");
         assert_eq!(event.event_type, "content");
         assert!(event.text.unwrap().contains("Just normal terminal text"));
+    }
+
+    #[test]
+    fn test_parse_acp_agy_stream_json() {
+        // agy --output-format=stream-json emits Claude-style NDJSON lines:
+        // partial message deltas carry content directly.
+        let raw = r#"{"type":"assistant","content":"Antigravity reply text"}"#;
+        let event = parse_acp_line("sess_agy", raw).expect("should parse");
+        assert_eq!(event.event_type, "content");
+        assert_eq!(event.text.as_deref(), Some("Antigravity reply text"));
+
+        // An error frame from agy must surface as an error event.
+        let err_raw = r#"{"type":"error","error":{"message":"auth expired"}}"#;
+        let err_event = parse_acp_line("sess_agy", err_raw).expect("should parse");
+        assert_eq!(err_event.event_type, "error");
+        assert_eq!(err_event.error.as_deref(), Some("auth expired"));
     }
 }

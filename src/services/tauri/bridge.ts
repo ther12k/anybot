@@ -158,6 +158,15 @@ async function safeInvoke<T>(cmd: string, args: Record<string, any> = {}): Promi
         version: "ZCode Desktop",
         protocol: "acp-jsonrpc",
       },
+      {
+        engine: "agy",
+        name: "Antigravity (agy)",
+        binary: "agy",
+        path: "/home/user/.local/bin/agy",
+        is_installed: true,
+        version: "1.5.9",
+        protocol: "acp-stdio",
+      },
     ] as unknown as T;
   }
   if (cmd === "kill_acp_session") {

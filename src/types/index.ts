@@ -12,7 +12,7 @@ export interface AIModel {
   /** True for subscription/plan models (zero token cost) via local CLI or ACP */
   isByop?: boolean;
   /** Target agent CLI engine */
-  agentEngine?: "claude" | "codex" | "opencode" | "zcode" | "custom";
+  agentEngine?: "claude" | "codex" | "opencode" | "zcode" | "agy" | "custom";
 }
 
 export interface DetectedAgentCli {
