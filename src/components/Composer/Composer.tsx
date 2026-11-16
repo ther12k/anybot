@@ -85,11 +85,41 @@ export const Composer: React.FC<ComposerProps> = ({
           </span>
 
           {isModelDropdownOpen && (
-            <div className="absolute bottom-full mb-1.5 left-0 w-72 max-h-80 overflow-y-auto rounded-xl border border-stroke bg-elevated shadow-lg p-1 z-50">
-              <div className="px-2 py-1.5 text-xxs font-semibold text-quaternary uppercase tracking-wide">
-                Select model
+            <div className="absolute bottom-full mb-1.5 left-0 w-80 max-h-96 overflow-y-auto rounded-xl border border-stroke bg-elevated shadow-xl p-1 z-50">
+              <div className="px-2 py-1 text-xxs font-semibold text-quaternary uppercase tracking-wide">
+                Bring-Your-Own-Plan (BYOP / ACP)
               </div>
-              {AVAILABLE_MODELS.map((model) => (
+              {AVAILABLE_MODELS.filter((m) => m.isByop).map((model) => (
+                <button
+                  key={model.id}
+                  onClick={() => {
+                    onSelectModel(model);
+                    setIsModelDropdownOpen(false);
+                  }}
+                  className={`w-full px-2.5 py-1.5 rounded-lg text-left text-xs flex items-center justify-between transition-colors ${
+                    selectedModel.id === model.id
+                      ? "bg-accent-soft text-primary"
+                      : "hover:bg-hover text-secondary"
+                  }`}
+                >
+                  <div className="min-w-0 pr-2">
+                    <div className="font-medium text-primary truncate">
+                      {model.name}
+                    </div>
+                    <div className="text-xxs text-quaternary">
+                      Subscription · No API fee
+                    </div>
+                  </div>
+                  <span className="text-xxs px-1.5 py-px rounded bg-accent/10 text-accent font-medium shrink-0">
+                    BYOP
+                  </span>
+                </button>
+              ))}
+
+              <div className="px-2 pt-2.5 pb-1 text-xxs font-semibold text-quaternary uppercase tracking-wide border-t border-stroke mt-1">
+                API Keys (BYOK) &amp; Local
+              </div>
+              {AVAILABLE_MODELS.filter((m) => !m.isByop).map((model) => (
                 <button
                   key={model.id}
                   onClick={() => {
@@ -110,19 +140,21 @@ export const Composer: React.FC<ComposerProps> = ({
                       {model.provider}
                     </div>
                   </div>
-                  {model.supportsThinking && (
-                    <span className="text-xxs px-1.5 py-px rounded bg-hover text-tertiary shrink-0">
-                      thinking
-                    </span>
-                  )}
-                  {!model.supportsTools && (
-                    <span
-                      className="text-xxs px-1.5 py-px rounded bg-hover text-tertiary shrink-0"
-                      title="This model cannot use shell/file tools — file and command tasks are disabled"
-                    >
-                      chat-only
-                    </span>
-                  )}
+                  <div className="flex items-center gap-1 shrink-0">
+                    {model.supportsThinking && (
+                      <span className="text-xxs px-1.5 py-px rounded bg-hover text-tertiary">
+                        thinking
+                      </span>
+                    )}
+                    {!model.supportsTools && (
+                      <span
+                        className="text-xxs px-1.5 py-px rounded bg-hover text-tertiary"
+                        title="This model cannot use shell/file tools — file and command tasks are disabled"
+                      >
+                        chat-only
+                      </span>
+                    )}
+                  </div>
                 </button>
               ))}
             </div>

@@ -1,5 +1,6 @@
 import { AIModel, ToolCallItem, VaultConfig } from "../../types";
 import { ANTHROPIC_TOOLS, OPENAI_TOOLS } from "./tools";
+import { TauriBridge } from "../tauri/bridge";
 
 export interface StreamCallbacks {
   onThinkingDelta?: (delta: string) => void;
@@ -71,7 +72,9 @@ export async function streamChatCompletion(
 ): Promise<void> {
   const includeTools = opts?.includeTools !== false;
   try {
-    if (model.provider === "anthropic") {
+    if (model.provider === "acp") {
+      await streamAcpAgent(model, messages, systemPrompt, callbacks, signal);
+    } else if (model.provider === "anthropic") {
       await streamAnthropic(model, vault, messages, systemPrompt, callbacks, signal, temperature, includeTools);
     } else if (model.provider === "ollama") {
       await streamOllama(model, vault, messages, systemPrompt, callbacks, signal, temperature, includeTools);
@@ -644,3 +647,93 @@ async function streamOllama(
 
   callbacks.onFinished?.();
 }
+
+// 4. ACP / BYOP Agent Runner Implementation
+async function streamAcpAgent(
+  model: AIModel,
+  messages: ChatMessagePayload[],
+  systemPrompt: string,
+  callbacks: StreamCallbacks,
+  signal?: AbortSignal
+) {
+  const engine = model.agentEngine || "claude";
+  const sessionId = `acp_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+
+  // Construct effective prompt from conversation messages
+  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+  const promptText = lastUserMsg?.content || "Hello";
+
+  // Full composite prompt if system prompt exists
+  const fullPrompt = systemPrompt
+    ? `[System Instructions]\n${systemPrompt}\n\n[User Request]\n${promptText}`
+    : promptText;
+
+  // Listen to abort signal to kill the agent process group
+  const abortListener = () => {
+    TauriBridge.killAcpSession(sessionId).catch(() => {});
+  };
+  signal?.addEventListener("abort", abortListener, { once: true });
+
+  let sawFinished = false;
+  let hasError: string | null = null;
+
+  try {
+    await TauriBridge.runAcpPrompt(
+      sessionId,
+      engine,
+      fullPrompt,
+      undefined,
+      (event) => {
+        if (signal?.aborted) return;
+
+        switch (event.event_type) {
+          case "thinking":
+            if (event.text) {
+              callbacks.onThinkingDelta?.(event.text);
+            }
+            break;
+          case "content":
+            if (event.text) {
+              callbacks.onContentDelta?.(event.text);
+            }
+            break;
+          case "tool_call":
+            if (event.tool_name) {
+              let parsedArgs = {};
+              try {
+                if (event.tool_args) {
+                  parsedArgs = JSON.parse(event.tool_args);
+                }
+              } catch {
+                parsedArgs = { raw: event.tool_args };
+              }
+              callbacks.onToolCall?.({
+                id: `acp_tool_${Date.now()}`,
+                name: event.tool_name as any,
+                arguments: parsedArgs,
+                status: "pending_approval",
+              });
+            }
+            break;
+          case "finished":
+            sawFinished = true;
+            break;
+          case "error":
+            hasError = event.error || "ACP Agent encountered an error.";
+            break;
+        }
+      }
+    );
+  } finally {
+    signal?.removeEventListener("abort", abortListener);
+  }
+
+  if (signal?.aborted) return;
+
+  if (hasError) {
+    throw new Error(hasError);
+  }
+
+  callbacks.onFinished?.();
+}
+

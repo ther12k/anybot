@@ -37,6 +37,9 @@ pub fn run() {
             proposal::approve_proposal,
             proposal::reject_proposal,
             proposal::cancel_proposal,
+            commands::agent_acp::detect_agent_clis,
+            commands::agent_acp::run_acp_prompt,
+            commands::agent_acp::kill_acp_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -1,7 +1,49 @@
 import { AIModel } from "../../types";
 
 export const AVAILABLE_MODELS: AIModel[] = [
-  // Anthropic Claude
+  // Bring-Your-Own-Plan (BYOP) & Agent Client Protocol (ACP)
+  {
+    id: "byop-claude",
+    name: "Claude Code (Subscription Plan)",
+    provider: "acp",
+    contextWindow: 200000,
+    supportsThinking: true,
+    supportsTools: true,
+    isByop: true,
+    agentEngine: "claude",
+  },
+  {
+    id: "byop-codex",
+    name: "Codex (ChatGPT Subscription)",
+    provider: "acp",
+    contextWindow: 128000,
+    supportsThinking: true,
+    supportsTools: true,
+    isByop: true,
+    agentEngine: "codex",
+  },
+  {
+    id: "byop-opencode",
+    name: "OpenCode (ACP Agent)",
+    provider: "acp",
+    contextWindow: 64000,
+    supportsThinking: false,
+    supportsTools: true,
+    isByop: true,
+    agentEngine: "opencode",
+  },
+  {
+    id: "byop-zcode",
+    name: "ZCode (ACP Agent)",
+    provider: "acp",
+    contextWindow: 128000,
+    supportsThinking: true,
+    supportsTools: true,
+    isByop: true,
+    agentEngine: "zcode",
+  },
+
+  // Anthropic Claude (BYOK API Key)
   {
     id: "claude-3-7-sonnet-20250219",
     name: "Claude 3.7 Sonnet (Hybrid Thinking)",

@@ -1,6 +1,6 @@
 export type Role = "user" | "assistant" | "system" | "tool";
 
-export type AIProvider = "anthropic" | "openai" | "ollama" | "grok";
+export type AIProvider = "anthropic" | "openai" | "ollama" | "grok" | "acp";
 
 export interface AIModel {
   id: string;
@@ -9,6 +9,20 @@ export interface AIModel {
   contextWindow: number;
   supportsThinking: boolean;
   supportsTools: boolean;
+  /** True for subscription/plan models (zero token cost) via local CLI or ACP */
+  isByop?: boolean;
+  /** Target agent CLI engine */
+  agentEngine?: "claude" | "codex" | "opencode" | "zcode" | "custom";
+}
+
+export interface DetectedAgentCli {
+  engine: string;
+  name: string;
+  binary: string;
+  path?: string | null;
+  is_installed: boolean;
+  version?: string | null;
+  protocol: string;
 }
 
 export type CommandSafetyTier = "Safe" | "Mutative" | "Dangerous";

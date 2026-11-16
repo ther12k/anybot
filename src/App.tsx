@@ -504,6 +504,8 @@ export const App: React.FC = () => {
 
     const hasKey = (m: AIModel) =>
       m.provider === "ollama" ||
+      m.provider === "acp" ||
+      m.isByop === true ||
       (m.provider === "anthropic" && !!vault.anthropicApiKey?.trim()) ||
       (m.provider === "openai" && !!vault.openaiApiKey?.trim()) ||
       (m.provider === "grok" && !!vault.grokApiKey?.trim());

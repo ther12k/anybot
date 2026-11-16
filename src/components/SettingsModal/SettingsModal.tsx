@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import { X, Key, Shield, ShieldCheck, HardDrive, Check, ExternalLink, Loader2, ScrollText } from "lucide-react";
-import { VaultConfig } from "../../types";
+import { X, Key, Shield, ShieldCheck, HardDrive, Check, ExternalLink, Loader2, ScrollText, Terminal, Sparkles } from "lucide-react";
+import { VaultConfig, DetectedAgentCli } from "../../types";
 import { TauriBridge } from "../../services/tauri/bridge";
 
 interface SettingsModalProps {
@@ -25,6 +25,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [autoApproveSafeTools, setAutoApproveSafeTools] = useState(true);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [detectedClis, setDetectedClis] = useState<DetectedAgentCli[]>([]);
   const [auditCheck, setAuditCheck] = useState<
     | { state: "idle" }
     | { state: "checking" }
@@ -44,6 +45,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setAutoApproveSafeTools(vault.autoApproveSafeTools ?? true);
     setSaveState("idle");
     setSaveError(null);
+
+    if (isOpen) {
+      TauriBridge.detectAgentClis()
+        .then((clis) => setDetectedClis(clis))
+        .catch(() => {});
+    }
   }, [isOpen, vault]);
 
   // Native modal semantics: showModal() traps focus, Escape fires `cancel`
@@ -195,6 +202,47 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 "Verify"
               )}
             </button>
+          </div>
+
+          {/* Bring-Your-Own-Plan (BYOP) & Agent Client Protocol (ACP) detection */}
+          <div className="p-3 rounded-xl bg-sidebar border border-stroke space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-secondary font-semibold">
+                <Sparkles className="w-3.5 h-3.5 text-accent" />
+                <span>Subscription Plans (BYOP &amp; ACP)</span>
+              </div>
+              <span className="text-xxs px-1.5 py-px rounded bg-accent/10 text-accent font-medium">
+                Zero Token Cost
+              </span>
+            </div>
+            <p className="text-xxs text-quaternary leading-relaxed">
+              AnyBot automatically detects installed agent CLIs. Use your existing Claude, ChatGPT, or local agent subscriptions without paying per-token API fees.
+            </p>
+            <div className="grid grid-cols-2 gap-1.5 pt-1">
+              {detectedClis.map((cli) => (
+                <div
+                  key={cli.engine}
+                  className={`px-2.5 py-1.5 rounded-lg border text-xxs flex items-center justify-between ${
+                    cli.is_installed
+                      ? "bg-chrome border-success/30 text-primary"
+                      : "bg-chrome/50 border-stroke text-quaternary"
+                  }`}
+                >
+                  <div className="min-w-0 pr-1">
+                    <div className="font-medium truncate flex items-center gap-1">
+                      <span className={`w-1.5 h-1.5 rounded-full ${cli.is_installed ? "bg-success" : "bg-quaternary"}`} />
+                      {cli.name}
+                    </div>
+                    <div className="text-quaternary font-mono text-[10px] truncate">
+                      {cli.is_installed ? (cli.version || cli.path || "Installed") : "Not detected"}
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-mono text-tertiary uppercase">
+                    {cli.binary}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
 
           {/* Anthropic */}

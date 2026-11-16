@@ -1,4 +1,4 @@
-import { CommandSafetyResult } from "../../types";
+import { CommandSafetyResult, DetectedAgentCli } from "../../types";
 
 /**
  * A standing grant ("Always allow" answer). Legacy grants are plain command
@@ -119,6 +119,49 @@ async function safeInvoke<T>(cmd: string, args: Record<string, any> = {}): Promi
       { name: "src", path: "/workspace/src", is_dir: true, is_file: false, size: 0 },
       { name: "package.json", path: "/workspace/package.json", is_dir: false, is_file: true, size: 1024 },
     ] as unknown as T;
+  }
+  if (cmd === "detect_agent_clis") {
+    return [
+      {
+        engine: "claude",
+        name: "Claude Code",
+        binary: "claude",
+        path: "/home/user/.local/bin/claude",
+        is_installed: true,
+        version: "2.1.322 (Claude Code)",
+        protocol: "acp-stream-json",
+      },
+      {
+        engine: "codex",
+        name: "Codex CLI",
+        binary: "codex",
+        path: null,
+        is_installed: false,
+        version: null,
+        protocol: "acp-jsonrpc",
+      },
+      {
+        engine: "opencode",
+        name: "OpenCode",
+        binary: "opencode",
+        path: null,
+        is_installed: false,
+        version: null,
+        protocol: "acp-jsonrpc",
+      },
+      {
+        engine: "zcode",
+        name: "ZCode",
+        binary: "zcode",
+        path: "/usr/bin/zcode",
+        is_installed: true,
+        version: "ZCode Desktop",
+        protocol: "acp-jsonrpc",
+      },
+    ] as unknown as T;
+  }
+  if (cmd === "kill_acp_session") {
+    return true as unknown as T;
   }
   return null as unknown as T;
 }
@@ -285,5 +328,72 @@ export const TauriBridge = {
 
   saveVaultConfig: async (jsonData: string): Promise<boolean> => {
     return safeInvoke("save_vault_config", { jsonData });
+  },
+
+  /** Scan system for installed BYOP / ACP Agent CLIs. */
+  detectAgentClis: async (): Promise<DetectedAgentCli[]> => {
+    return safeInvoke<DetectedAgentCli[]>("detect_agent_clis");
+  },
+
+  /** Run a prompt via an ACP / BYOP agent CLI subprocess with streaming events. */
+  runAcpPrompt: async (
+    sessionId: string,
+    engine: string,
+    prompt: string,
+    cwd: string | undefined,
+    onEvent: (event: {
+      session_id: string;
+      event_type: "thinking" | "content" | "tool_call" | "finished" | "error";
+      text?: string;
+      tool_name?: string;
+      tool_args?: string;
+      error?: string;
+    }) => void
+  ): Promise<boolean> => {
+    if (isTauriEnvironment()) {
+      const { invoke, Channel } = await import("@tauri-apps/api/core");
+      const channel = new Channel<any>();
+      channel.onmessage = (message) => {
+        onEvent(message);
+      };
+      return invoke("run_acp_prompt", {
+        sessionId,
+        engine,
+        prompt,
+        cwd,
+        channel,
+      });
+    }
+
+    // Mock browser stream
+    setTimeout(() => {
+      onEvent({
+        session_id: sessionId,
+        event_type: "thinking",
+        text: `[${engine}] Analyzing workspace via Agent Client Protocol...`,
+      });
+    }, 200);
+
+    setTimeout(() => {
+      onEvent({
+        session_id: sessionId,
+        event_type: "content",
+        text: `Hello! I am ${engine.toUpperCase()} running via Bring-Your-Own-Plan (BYOP). Your prompt was: "${prompt.slice(0, 50)}..."`,
+      });
+    }, 800);
+
+    setTimeout(() => {
+      onEvent({
+        session_id: sessionId,
+        event_type: "finished",
+      });
+    }, 1500);
+
+    return true;
+  },
+
+  /** Terminate an active ACP agent session. */
+  killAcpSession: async (sessionId: string): Promise<boolean> => {
+    return safeInvoke("kill_acp_session", { sessionId });
   },
 };
