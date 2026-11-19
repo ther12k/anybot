@@ -5,6 +5,7 @@ import { Composer } from "./components/Composer/Composer";
 import { BotDrawer } from "./components/BotDrawer/BotDrawer";
 import { SettingsModal } from "./components/SettingsModal/SettingsModal";
 import { BotLibraryModal } from "./components/BotLibraryModal/BotLibraryModal";
+import { NewRoomModal } from "./components/NewRoomModal/NewRoomModal";
 import { AnyBotCharacter, type TaviMood } from "./components/Tavi/AnyBotCharacter";
 import { DEFAULT_BOTS } from "./data/defaultBots";
 import { DEFAULT_WORKFLOWS } from "./data/defaultWorkflows";
@@ -19,6 +20,7 @@ import {
   VaultConfig,
   AIModel,
   BotWorkflow,
+  ToolCallItem,
 } from "./types";
 import { ChevronRight, ArrowDown, Eye, Square } from "lucide-react";
 
@@ -146,11 +148,17 @@ export const App: React.FC = () => {
   const agentLoopRef = useRef<AgentLoop>(new AgentLoop());
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
-  // Stable mirror of transcripts/threads for effects that must not re-fire per token
+  // Stable mirror of transcripts/threads for effects that must not re-fire
+  // per token — Team Room runners also re-read transcriptsRef between
+  // responders so bot N sees bot N-1's reply in its history.
   const transcriptsRef = useRef(transcripts);
   transcriptsRef.current = transcripts;
   const threadsRef = useRef(threads);
   threadsRef.current = threads;
+  /** Persona running the CURRENT turn (Team Rooms): delegation audit
+   *  provenance names the actual speaker, not the sidebar selection. */
+  const currentRunBotIdRef = useRef<string | null>(null);
+  const [isRoomModalOpen, setIsRoomModalOpen] = useState(false);
 
   useEffect(() => {
     async function init() {
@@ -292,6 +300,13 @@ export const App: React.FC = () => {
   // ---- Derived run context -------------------------------------------------
   const currentTranscript = activeThreadId ? transcripts[activeThreadId] || [] : [];
   const activeThread = threads.find((t) => t.id === activeThreadId) ?? null;
+  /** Team Room members of the active thread (empty for 1:1 chats). */
+  const roomMembers: BotPersona[] =
+    activeThread?.isRoom && activeThread.participantBotIds
+      ? (activeThread.participantBotIds
+          .map((id) => bots.find((b) => b.id === id))
+          .filter(Boolean) as BotPersona[])
+      : [];
 
   const hasPendingWriteReview = currentTranscript.some((e) =>
     e.toolCalls?.some((tc) => tc.name === "write_file" && tc.status === "pending_approval")
@@ -491,10 +506,13 @@ export const App: React.FC = () => {
         error: `Unknown bot "${botRef}". Available bots: ${bots.map((b) => b.name).join(", ")}.`,
       };
     }
-    // The delegator is the bot THIS thread runs on, not whatever persona is
-    // currently highlighted in the sidebar.
+    // The delegator is the bot actually speaking in this run (Team Rooms),
+    // else the thread's bot — never merely the sidebar selection.
     const threadBotId = threads.find((t) => t.id === activeThreadId)?.botId ?? activeBot.id;
-    const fromBot = bots.find((b) => b.id === threadBotId) ?? activeBot;
+    const fromBot =
+      bots.find((b) => b.id === currentRunBotIdRef.current) ??
+      bots.find((b) => b.id === threadBotId) ??
+      activeBot;
     if (target.id === fromBot.id) {
       return { ok: false, error: `You are already ${target.name} — answer this yourself.` };
     }
@@ -557,6 +575,54 @@ export const App: React.FC = () => {
     agentLoopRef.current.delegateResolver = handleDelegateTask;
   });
 
+  /** Team Rooms: resolve who answers a message. @slug mentions are
+   *  authoritative (slugs are unique — the autocomplete inserts them);
+   *  hand-typed @FirstName only counts when it matches exactly ONE member
+   *  (so "@grok" never drags in "Grok (Fun Mode)"). Every mentioned member
+   *  responds, capped at 3; no mention → the room's primary bot. */
+  const resolveRoomResponders = (text: string, thread: Thread): BotPersona[] => {
+    const participants = (thread.participantBotIds || [])
+      .map((id) => bots.find((b) => b.id === id))
+      .filter(Boolean) as BotPersona[];
+    const lower = text.toLowerCase();
+    const slugHits = participants.filter((b) =>
+      lower.includes(`@${b.slug.toLowerCase()}`)
+    );
+    const wordHits = participants.filter((b) => {
+      const firstWord = b.name.split(/\s+/)[0];
+      return (
+        firstWord.length > 2 && lower.includes(`@${firstWord.toLowerCase()}`)
+      );
+    });
+    const mentioned =
+      slugHits.length > 0
+        ? slugHits
+        : wordHits.length === 1
+          ? wordHits
+          : [];
+    const responders =
+      mentioned.length > 0 ? mentioned.slice(0, 3) : participants.slice(0, 1);
+    // Fallback when the primary bot is no longer on the roster.
+    return responders.length > 0 ? responders : [activeBot];
+  };
+
+  const handleCreateRoom = (name: string, memberIds: string[]) => {
+    if (!name.trim() || memberIds.length < 2) return;
+    const newRoom: Thread = {
+      id: `thread_${Date.now()}`,
+      botId: memberIds[0],
+      modelId: selectedModel.id,
+      title: name.trim(),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      isRoom: true,
+      participantBotIds: memberIds,
+    };
+    setThreads([newRoom, ...threads]);
+    setActiveThreadId(newRoom.id);
+    setIsRoomModalOpen(false);
+  };
+
   const handleSendMessage = async (text: string): Promise<RunOutcome | null> => {
     // Concurrency policy: one run at a time. Sending during an active or
     // settling run is refused instead of sharing its controller.
@@ -578,7 +644,9 @@ export const App: React.FC = () => {
       currentThreadId = newThread.id;
     } else {
       const currentList = transcripts[currentThreadId] || [];
-      if (currentList.length === 0) {
+      const existing = threads.find((t) => t.id === currentThreadId);
+      // Rooms keep their given name; 1:1 chats adopt the first message.
+      if (currentList.length === 0 && !existing?.isRoom) {
         setThreads(
           threads.map((t) =>
             t.id === currentThreadId
@@ -608,45 +676,97 @@ export const App: React.FC = () => {
       bots.find((b) => b.id === (thread?.botId ?? activeBot.id)) ?? activeBot;
     const threadModel = selectedModel;
 
+    // Team Rooms: every @mentioned member answers in order (each sees prior
+    // replies); no mention falls back to the room's primary bot.
+    const responders: BotPersona[] = thread?.isRoom
+      ? resolveRoomResponders(text, thread)
+      : [threadBot];
+
+    const makeRunCallbacks = (tid: string) => ({
+      onUpdateEntry: (updatedEntry: TranscriptEntry) => {
+        setTranscripts((prev) => {
+          // The task may have been deleted mid-run; never resurrect a
+          // transcript for a thread that no longer exists.
+          if (!threadsRef.current.some((t) => t.id === tid)) return prev;
+          const list = prev[tid] || [];
+          const idx = list.findIndex((e) => e.id === updatedEntry.id);
+          if (idx !== -1) {
+            const nextList = [...list];
+            nextList[idx] = updatedEntry;
+            return { ...prev, [tid]: nextList };
+          }
+          return prev;
+        });
+      },
+      onAddEntry: (newEntry: TranscriptEntry) => {
+        setTranscripts((prev) => {
+          if (!threadsRef.current.some((t) => t.id === tid)) return prev;
+          const list = prev[tid] || [];
+          return { ...prev, [tid]: [...list, newEntry] };
+        });
+      },
+      onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean) => void) => {
+        approvalResolversRef.current.set(toolCall.id, resolve);
+      },
+    });
+
     setIsGenerating(true);
     setIsStopping(false);
     setLastOutcome(null);
 
     try {
-      const outcome = await agentLoopRef.current.runTurn(
-        currentThreadId,
-        threadHistory,
-        threadBot,
-        threadModel,
-        vault,
-        (updatedEntry) => {
-          setTranscripts((prev) => {
-            // The task may have been deleted mid-run; never resurrect a
-            // transcript for a thread that no longer exists.
-            if (!threadsRef.current.some((t) => t.id === currentThreadId)) return prev;
-            const list = prev[currentThreadId!] || [];
-            const idx = list.findIndex((e) => e.id === updatedEntry.id);
-            if (idx !== -1) {
-              const nextList = [...list];
-              nextList[idx] = updatedEntry;
-              return { ...prev, [currentThreadId!]: nextList };
-            }
-            return prev;
-          });
-        },
-        (newEntry) => {
-          setTranscripts((prev) => {
-            if (!threadsRef.current.some((t) => t.id === currentThreadId)) return prev;
-            const list = prev[currentThreadId!] || [];
-            return { ...prev, [currentThreadId!]: [...list, newEntry] };
-          });
-        },
-        (toolCall, resolve) => {
-          approvalResolversRef.current.set(toolCall.id, resolve);
+      let finalOutcome: RunOutcome = "completed";
+      for (let i = 0; i < responders.length; i++) {
+        // Stop breaks the responder chain honestly (workflow pattern).
+        if (i > 0 && stopWorkflowRef.current) {
+          finalOutcome = "cancelled";
+          break;
         }
-      );
-      setLastOutcome(outcome);
-      return outcome;
+        const responder = responders[i];
+        currentRunBotIdRef.current = responder.id;
+        // Re-read live history so responder N sees responder N-1's reply.
+        const history =
+          i === 0 ? threadHistory : [...(transcriptsRef.current[currentThreadId] || [])];
+        const { onUpdateEntry, onAddEntry, onNeedsApproval } =
+          makeRunCallbacks(currentThreadId);
+        // Room members answer with room context: who else is here and that
+        // prior replies in the transcript came from teammates.
+        const effectiveBot: BotPersona = thread?.isRoom
+          ? {
+              ...responder,
+              systemPrompt:
+                `[You are "${responder.name}" in the team room "${thread.title}". ` +
+                `Room members: ${responders.length > 0 && thread.participantBotIds
+                  ?.map((id) => bots.find((b) => b.id === id)?.name)
+                  .filter(Boolean)
+                  .join(", ")}. ` +
+                `The user's message may @mention you or other agents; earlier replies from other agents are visible in the conversation — build on them instead of repeating. Stay in your role and answer as ${responder.name}.]\n\n` +
+                responder.systemPrompt,
+            }
+          : responder;
+        const outcome = await agentLoopRef.current.runTurn(
+          currentThreadId,
+          history,
+          effectiveBot,
+          threadModel,
+          vault,
+          onUpdateEntry,
+          onAddEntry,
+          onNeedsApproval,
+          thread?.isRoom ? responder.id : undefined
+        );
+        if (outcome === "cancelled") {
+          finalOutcome = "cancelled";
+          break;
+        }
+        if (outcome === "failed") {
+          finalOutcome = "failed";
+          break;
+        }
+      }
+      currentRunBotIdRef.current = null;
+      setLastOutcome(finalOutcome);
+      return finalOutcome;
     } finally {
       // Settle before accepting new input: Stop keeps control until here.
       setIsGenerating(false);
@@ -771,6 +891,7 @@ export const App: React.FC = () => {
         onOpenSettings={() => setIsSettingsModalOpen(true)}
         onOpenBotDrawer={() => setIsBotDrawerOpen(true)}
         onOpenBotLibrary={() => setIsLibraryModalOpen(true)}
+        onOpenRoomModal={() => setIsRoomModalOpen(true)}
         systemInfo={systemInfo}
       />
 
@@ -778,19 +899,44 @@ export const App: React.FC = () => {
       <main className="relative flex-1 flex flex-col h-full min-w-0 bg-chrome">
         {/* Header — task identity + authoritative run status */}
         <header className="h-12 border-b border-stroke px-5 flex items-center justify-between shrink-0 bg-chrome">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <span className="text-base select-none">{activeBot.avatar}</span>
-            <div className="min-w-0">
-              <h2 className="text-sm font-semibold text-primary truncate leading-tight">
-                {activeBot.name}
-              </h2>
-              <p className="text-xxs text-quaternary truncate max-w-md leading-tight">
-                {activeThread?.title && activeThread.title !== "New chat"
-                  ? activeThread.title
-                  : activeBot.description}
-              </p>
+          {activeThread?.isRoom ? (
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="text-accent font-bold select-none" aria-hidden="true">#</span>
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold text-primary truncate leading-tight">
+                  {activeThread.title}
+                </h2>
+                <p className="text-xxs text-quaternary truncate max-w-md leading-tight">
+                  {roomMembers.length} agents · @mention to address one
+                </p>
+              </div>
+              <div className="flex items-center -space-x-1.5 ml-1" aria-hidden="true">
+                {roomMembers.slice(0, 5).map((m) => (
+                  <span
+                    key={m.id}
+                    title={m.name}
+                    className="w-5 h-5 rounded-full bg-elevated border border-stroke flex items-center justify-center text-[10px] select-none"
+                  >
+                    {m.avatar}
+                  </span>
+                ))}
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="text-base select-none">{activeBot.avatar}</span>
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold text-primary truncate leading-tight">
+                  {activeBot.name}
+                </h2>
+                <p className="text-xxs text-quaternary truncate max-w-md leading-tight">
+                  {activeThread?.title && activeThread.title !== "New chat"
+                    ? activeThread.title
+                    : activeBot.description}
+                </p>
+              </div>
+            </div>
+          )}
 
           <div className="flex items-center gap-3 shrink-0">
             {/* Status: text label is authoritative; Tavi is supplementary */}
@@ -825,6 +971,52 @@ export const App: React.FC = () => {
             /* Welcome / empty state — scrollable, centered when it fits */
             <div className="h-full overflow-y-auto">
               <div className="min-h-full flex flex-col items-center justify-center px-6 py-8 max-w-xl mx-auto select-none">
+                {activeThread?.isRoom ? (
+                  /* Team Room welcome: members front and center, no single-bot starters. */
+                  <>
+                    <span aria-hidden="true" className="mb-2 shrink-0">
+                      <AnyBotCharacter mood={welcomeMood} size={72} />
+                    </span>
+                    <h3 className="text-lg font-semibold text-primary mb-1 flex items-center gap-1.5">
+                      <span className="text-accent font-bold" aria-hidden="true">#</span>
+                      {activeThread.title}
+                    </h3>
+                    <p className="text-xs text-quaternary leading-relaxed mb-5 text-center max-w-sm">
+                      A shared room with {roomMembers.length} agents. Type{" "}
+                      <span className="font-mono font-semibold text-secondary">@</span> in the
+                      composer to address one — or several — directly; messages without a
+                      mention go to{" "}
+                      <span className="font-medium text-secondary">
+                        {roomMembers[0]?.name ?? "the primary agent"}
+                      </span>
+                      .
+                    </p>
+                    <div className="grid grid-cols-1 gap-1.5 w-full">
+                      {roomMembers.map((m) => (
+                        <div
+                          key={m.id}
+                          className="px-3.5 py-2.5 rounded-xl border border-stroke bg-elevated text-left text-xs flex items-center gap-2.5"
+                        >
+                          <span
+                            className="w-6 h-6 rounded-lg bg-hover flex items-center justify-center shrink-0 select-none"
+                            aria-hidden="true"
+                          >
+                            {m.avatar}
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block font-medium text-primary truncate">
+                              {m.name}
+                            </span>
+                            <span className="block text-xxs text-quaternary truncate">
+                              {m.description}
+                            </span>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                <>
                 <span aria-hidden="true" className="mb-1 shrink-0">
                   <AnyBotCharacter mood={welcomeMood} size={88} />
                 </span>
@@ -951,15 +1143,19 @@ export const App: React.FC = () => {
                     })}
                   </div>
                 </div>
-              </div>
+                </>
+                )}
             </div>
+          </div>
           ) : (
             <div className="py-4 space-y-1">
               {currentTranscript.map((entry) => (
                 <MessageItem
                   key={entry.id}
                   entry={entry}
-                  bot={activeBot}
+                  bot={
+                    bots.find((b) => b.id === entry.authorBotId) ?? activeBot
+                  }
                   onApproveTool={handleApproveTool}
                   onAlwaysAllowTool={handleAlwaysAllowTool}
                   onRejectTool={handleRejectTool}
@@ -1019,6 +1215,7 @@ export const App: React.FC = () => {
             isStopping={isStopping}
             selectedModel={selectedModel}
             onSelectModel={handleSelectModel}
+            mentionCandidates={activeThread?.isRoom ? roomMembers : undefined}
           />
         )}
 
@@ -1059,6 +1256,14 @@ export const App: React.FC = () => {
         onSelectBot={handleSelectBot}
         onCustomizeBot={handleCustomizeBot}
         onCreateNewBot={handleCreateNewBot}
+      />
+
+      {/* New Team Room Modal */}
+      <NewRoomModal
+        isOpen={isRoomModalOpen}
+        onClose={() => setIsRoomModalOpen(false)}
+        bots={bots}
+        onCreateRoom={handleCreateRoom}
       />
 
       {/* Undo delete toast */}

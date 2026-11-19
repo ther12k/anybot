@@ -6,6 +6,7 @@ import {
   Settings,
   ChevronRight,
   Search,
+  Hash,
 } from "lucide-react";
 import { Thread, BotPersona } from "../../types";
 
@@ -22,6 +23,7 @@ interface SidebarProps {
   onOpenSettings: () => void;
   onOpenBotDrawer: () => void;
   onOpenBotLibrary: () => void;
+  onOpenRoomModal: () => void;
   systemInfo: { os: string; username: string; cwd: string } | null;
 }
 
@@ -38,6 +40,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenSettings,
   onOpenBotDrawer,
   onOpenBotLibrary,
+  onOpenRoomModal,
   systemInfo,
 }) => {
   const [query, setQuery] = useState("");
@@ -45,9 +48,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const q = query.trim().toLowerCase();
   const matches = (t: Thread) =>
     q === "" || t.title.toLowerCase().includes(q);
-  const pinned = threads.filter((t) => t.isPinned && matches(t));
-  const rest = threads.filter((t) => !t.isPinned && matches(t));
-  const anyThreadMatches = pinned.length > 0 || rest.length > 0;
+  // Rooms live in their own section; 1:1 chats keep Pinned/Recents.
+  const rooms = threads.filter((t) => t.isRoom && matches(t));
+  const nonRooms = threads.filter((t) => !t.isRoom);
+  const pinned = nonRooms.filter((t) => t.isPinned && matches(t));
+  const rest = nonRooms.filter((t) => !t.isPinned && matches(t));
+  const anyThreadMatches =
+    rooms.length > 0 || pinned.length > 0 || rest.length > 0;
 
   const renderThread = (t: Thread) => {
     const isActive = activeThreadId === t.id;
@@ -206,6 +213,79 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Threads */}
       <div className="flex-1 overflow-y-auto px-2 space-y-3">
+        {/* Team Rooms — shared multi-agent channels */}
+        <div>
+          <div className="px-2 py-1 flex items-center justify-between">
+            <span className="text-xxs font-semibold text-tertiary uppercase tracking-wide">
+              Rooms
+            </span>
+            <button
+              onClick={onOpenRoomModal}
+              className="text-xxs text-accent hover:underline flex items-center gap-0.5 font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
+              title="Create a shared room with multiple agents"
+            >
+              <Plus className="w-3 h-3" aria-hidden="true" />
+              New
+            </button>
+          </div>
+          {rooms.length === 0 ? (
+            <div className="px-3 py-2 text-xxs text-quaternary">
+              No rooms yet — create one to chat with several agents at once
+            </div>
+          ) : (
+            <ul className="space-y-0.5 list-none">
+              {rooms.map((t) => {
+                const isActive = activeThreadId === t.id;
+                const memberAvatars = (t.participantBotIds || [])
+                  .map((id) => bots.find((b) => b.id === id)?.avatar)
+                  .filter(Boolean)
+                  .slice(0, 4);
+                return (
+                  <li
+                    key={t.id}
+                    className={`group flex items-center gap-0.5 pr-1 pl-1 rounded-lg text-xs transition-colors ${
+                      isActive ? "bg-active" : "hover:bg-hover"
+                    }`}
+                  >
+                    <button
+                      onClick={() => onSelectThread(t.id)}
+                      aria-current={isActive ? "true" : undefined}
+                      className={`flex-1 min-w-0 text-left py-1.5 flex items-center gap-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded ${
+                        isActive ? "text-primary font-medium" : "text-secondary"
+                      }`}
+                    >
+                      <Hash className="w-3 h-3 shrink-0 text-tertiary" aria-hidden="true" />
+                      <span className="truncate">{t.title}</span>
+                      <span
+                        className="flex items-center -space-x-1 shrink-0"
+                        aria-hidden="true"
+                      >
+                        {memberAvatars.map((a, i) => (
+                          <span
+                            key={i}
+                            className="w-4 h-4 rounded-full bg-elevated border border-stroke flex items-center justify-center text-[9px]"
+                          >
+                            {a}
+                          </span>
+                        ))}
+                      </span>
+                    </button>
+                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
+                      <button
+                        onClick={() => onDeleteThread(t.id)}
+                        className="p-1 rounded hover:bg-active text-tertiary hover:text-danger focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                        aria-label={`Delete room ${t.title}`}
+                      >
+                        <Trash2 className="w-3 h-3" aria-hidden="true" />
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
         {pinned.length > 0 && (
           <div>
             <div className="px-2 py-1 text-xxs font-semibold text-tertiary uppercase tracking-wide">

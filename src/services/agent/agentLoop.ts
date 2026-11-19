@@ -109,7 +109,9 @@ export class AgentLoop {
     vault: VaultConfig,
     onUpdateEntry: (entry: TranscriptEntry) => void,
     onAddEntry: (entry: TranscriptEntry) => void,
-    onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean) => void) => void
+    onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean) => void) => void,
+    /** Team Rooms: persona that authors this run's assistant entries. */
+    authorBotId?: string
   ): Promise<RunOutcome> {
     if (this.activeRun) return "cancelled";
 
@@ -126,7 +128,7 @@ export class AgentLoop {
     try {
       await this.executeTurn(
         threadId, transcript, bot, model, vault,
-        onUpdateEntry, onAddEntry, onNeedsApproval, run
+        onUpdateEntry, onAddEntry, onNeedsApproval, run, authorBotId
       );
     } finally {
       // Identity check: only the owning run clears itself. A stale settle
@@ -145,7 +147,8 @@ export class AgentLoop {
     onUpdateEntry: (entry: TranscriptEntry) => void,
     onAddEntry: (entry: TranscriptEntry) => void,
     onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean) => void) => void,
-    run: RunContext
+    run: RunContext,
+    authorBotId?: string
   ): Promise<void> {
     const signal = run.controller.signal;
 
@@ -193,6 +196,7 @@ export class AgentLoop {
       id: assistantEntryId,
       threadId,
       role: "assistant",
+      ...(authorBotId ? { authorBotId } : {}),
       content: "",
       thinking: "",
       isThinkingActive: false,
@@ -302,7 +306,8 @@ export class AgentLoop {
           onUpdateEntry,
           onAddEntry,
           onNeedsApproval,
-          run
+          run,
+          authorBotId
         );
       }
     } catch (err: any) {

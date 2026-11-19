@@ -59,6 +59,8 @@ export interface TranscriptEntry {
   threadId: string;
   role: Role;
   content: string;
+  /** Persona that authored this assistant entry (Team Rooms attribution). */
+  authorBotId?: string;
   thinking?: string;
   isThinkingActive?: boolean;
   thinkingDurationMs?: number;
@@ -116,6 +118,11 @@ export interface Thread {
   createdAt: number;
   updatedAt: number;
   isPinned?: boolean;
+  /** True when this thread is a Team Room (multi-persona channel). */
+  isRoom?: boolean;
+  /** Room members (personas). `botId` remains the room's PRIMARY bot —
+   *  the default addressee for messages without an @mention. */
+  participantBotIds?: string[];
 }
 
 export interface VaultConfig {
