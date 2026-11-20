@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
-import { X, Users, Check } from "lucide-react";
+import React, { useEffect, useId, useRef, useState } from "react";
+import { Users, X } from "lucide-react";
 import { BotPersona } from "../../types";
+import "./NewRoomModal.css";
 
 interface NewRoomModalProps {
   isOpen: boolean;
@@ -9,11 +10,7 @@ interface NewRoomModalProps {
   onCreateRoom: (name: string, memberIds: string[]) => void;
 }
 
-/**
- * Create a Team Room: a shared thread where multiple personas + the user
- * converse, with @mention routing. Requires a name and at least 2 members —
- * the first member picked becomes the room's primary addressee.
- */
+/** The first agent picked is the primary addressee. */
 export const NewRoomModal: React.FC<NewRoomModalProps> = ({
   isOpen,
   onClose,
@@ -22,182 +19,96 @@ export const NewRoomModal: React.FC<NewRoomModalProps> = ({
 }) => {
   const [roomName, setRoomName] = useState("");
   const [memberIds, setMemberIds] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<"name" | "members" | null>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const firstMemberRef = useRef<HTMLInputElement>(null);
+  const id = useId();
 
   useEffect(() => {
+    const dialog = dialogRef.current;
     if (isOpen) {
       setRoomName("");
       setMemberIds([]);
       setError(null);
-      const d = dialogRef.current;
-      if (d && !d.open) d.showModal();
+      if (dialog && !dialog.open) dialog.showModal();
       nameInputRef.current?.focus();
     } else {
-      dialogRef.current?.close();
+      dialog?.close();
     }
   }, [isOpen]);
 
-  // The IAB webview doesn't fire native `cancel` for synthesized Escape —
-  // mirror the keydown fallback used by the Settings modal.
-  useEffect(() => {
-    const d = dialogRef.current;
-    if (!d) return;
-    const onKeydown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    d.addEventListener("keydown", onKeydown);
-    return () => d.removeEventListener("keydown", onKeydown);
-  }, [onClose]);
-
-  const toggleMember = (id: string) => {
-    setMemberIds((prev) =>
-      prev.includes(id) ? prev.filter((m) => m !== id) : [...prev, id]
-    );
-    setError(null);
+  const availableMemberIds = memberIds.filter((memberId) => bots.some((bot) => bot.id === memberId));
+  const toggleMember = (memberId: string) => {
+    setMemberIds((previous) => previous.includes(memberId)
+      ? previous.filter((id) => id !== memberId)
+      : [...previous, memberId]);
+    setError((previous) => previous === "members" ? null : previous);
   };
 
-  const handleCreate = () => {
+  const handleCreate = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     if (!roomName.trim()) {
-      setError("Give the room a name.");
+      setError("name");
+      nameInputRef.current?.focus();
       return;
     }
-    if (memberIds.length < 2) {
-      setError("Pick at least 2 agents — a room is a shared conversation.");
+    if (availableMemberIds.length < 2) {
+      setError("members");
+      firstMemberRef.current?.focus();
       return;
     }
-    onCreateRoom(roomName, memberIds);
+    onCreateRoom(roomName.trim(), availableMemberIds);
   };
 
   return (
-    <dialog
-      ref={dialogRef}
-      aria-labelledby="new-room-title"
-      className="w-[calc(100%-2rem)] max-w-md bg-chrome border border-stroke rounded-2xl shadow-xl overflow-hidden"
-    >
-      <div className="flex flex-col select-text">
-        {/* Header */}
-        <div className="px-5 h-12 border-b border-stroke flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2">
-            <Users className="w-4 h-4 text-accent" aria-hidden="true" />
-            <h3 id="new-room-title" className="text-sm font-semibold text-primary">
-              New team room
-            </h3>
+    <dialog ref={dialogRef} aria-labelledby={`${id}-title`} className="anybot-room-dialog"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); onClose(); } }}>
+      <form className="modal select-text" onSubmit={handleCreate}>
+        <header className="modal-head">
+          <div>
+            <h2 id={`${id}-title`}>A few good minds, together.</h2>
+            <p>Create a room with distinct agent perspectives. You review requests that need approval.</p>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 text-tertiary hover:text-primary rounded-lg hover:bg-hover transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            aria-label="Close new room"
-          >
-            <X className="w-4 h-4" aria-hidden="true" />
-          </button>
-        </div>
-
-        {/* Content */}
-        <div className="p-5 space-y-4 text-xs">
-          <div className="space-y-1.5">
-            <label htmlFor="room-name" className="font-semibold text-secondary">
-              Room name
-            </label>
-            <input
-              id="room-name"
-              ref={nameInputRef}
-              value={roomName}
-              onChange={(e) => {
-                setRoomName(e.target.value);
-                setError(null);
-              }}
-              onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-              placeholder="e.g. dev-team"
-              className="w-full h-9 px-3 rounded-xl bg-sidebar border border-stroke text-primary text-xs placeholder:text-quaternary focus:outline-none focus:border-strokeStrong focus-visible:ring-2 focus-visible:ring-accent"
-            />
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close new room"><X className="icon" aria-hidden="true" /></button>
+        </header>
+        <div className="modal-body">
+          <div className="field">
+            <label htmlFor={`${id}-name`}>Room name</label>
+            <input id={`${id}-name`} ref={nameInputRef} value={roomName}
+              aria-invalid={error === "name" || undefined} aria-describedby={error === "name" ? `${id}-error` : undefined}
+              onChange={(event) => { setRoomName(event.target.value); setError((previous) => previous === "name" ? null : previous); }}
+              placeholder="e.g. Launch planning" />
           </div>
-
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span className="font-semibold text-secondary">Members</span>
-              <span className="text-xxs text-quaternary">
-                {memberIds.length} picked · first pick is the primary agent
-              </span>
-            </div>
-            <div className="max-h-56 overflow-y-auto rounded-xl border border-stroke divide-y divide-stroke">
-              {bots.map((bot) => {
-                const checked = memberIds.includes(bot.id);
-                const order = memberIds.indexOf(bot.id);
-                return (
-                  <button
-                    key={bot.id}
-                    onClick={() => toggleMember(bot.id)}
-                    className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition-colors ${
-                      checked ? "bg-accent-soft" : "hover:bg-hover"
-                    }`}
-                    aria-pressed={checked}
-                  >
-                    <span
-                      className="w-6 h-6 rounded-lg bg-hover flex items-center justify-center shrink-0 select-none"
-                      aria-hidden="true"
-                    >
-                      {bot.avatar}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block font-medium text-primary truncate">
-                        {bot.name}
-                      </span>
-                      <span className="block text-xxs text-quaternary truncate">
-                        @{bot.slug}
-                      </span>
-                    </span>
-                    {checked && order === 0 && (
-                      <span className="text-xxs px-1.5 py-px rounded bg-accent/10 text-accent font-medium shrink-0">
-                        primary
-                      </span>
-                    )}
-                    <span
-                      className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
-                        checked
-                          ? "bg-accent border-accent text-white"
-                          : "border-strokeStrong"
-                      }`}
-                      aria-hidden="true"
-                    >
-                      {checked && <Check className="w-3 h-3" />}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {error && (
-            <p className="text-xxs text-danger" role="alert">
-              {error}
-            </p>
-          )}
-
-          <p className="text-xxs text-quaternary leading-relaxed">
-            In a room, <span className="font-mono font-semibold text-secondary">@mention</span>{" "}
-            routes your message — every mentioned agent answers in turn and sees its
-            teammates' replies. Messages without a mention go to the primary agent.
+          <fieldset aria-describedby={`${id}-members-note${error === "members" ? ` ${id}-error` : ""}`}>
+            <legend className="modal-label">Choose your agents</legend>
+            <p id={`${id}-members-note`} className="anybot-room-note">{availableMemberIds.length} picked · first pick is the primary agent</p>
+            {bots.length < 2 && <p className="anybot-room-note">At least two available agents are needed to create a room.</p>}
+            {bots.map((bot, index) => (
+              <label key={bot.id} className="checkbox-row">
+                <input type="checkbox" ref={index === 0 ? firstMemberRef : undefined}
+                  checked={availableMemberIds.includes(bot.id)} onChange={() => toggleMember(bot.id)} />
+                <span className="shrink-0" aria-hidden="true">{bot.avatar}</span>
+                <span className="min-w-0 break-words">{bot.name} <span className="text-tertiary">@{bot.slug}</span></span>
+                {availableMemberIds[0] === bot.id && <span className="tag shrink-0">Primary</span>}
+              </label>
+            ))}
+          </fieldset>
+          {error && <p id={`${id}-error`} className="caption-note text-danger" role="alert">
+            {error === "name" ? "Give the room a name." : "Pick at least 2 agents — a room is a shared conversation."}
+          </p>}
+          <p className="caption-note">
+            In a room, <code>@mention</code> routes your message. Mentioned agents respond in turn; messages without a mention go to the primary agent.
           </p>
         </div>
-
-        {/* Footer */}
-        <div className="px-5 py-3 border-t border-stroke flex items-center justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="px-3 py-1.5 rounded-lg border border-stroke bg-elevated hover:bg-elevatedHover text-xs font-medium text-secondary hover:text-primary transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-          >
-            Cancel
+        <footer className="modal-footer">
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn primary" disabled={bots.length < 2}>
+            <Users className="icon" aria-hidden="true" /> Create room
           </button>
-          <button
-            onClick={handleCreate}
-            className="px-3 py-1.5 rounded-lg bg-accent hover:bg-accentHover text-white text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-          >
-            Create room
-          </button>
-        </div>
-      </div>
+        </footer>
+      </form>
     </dialog>
   );
 };

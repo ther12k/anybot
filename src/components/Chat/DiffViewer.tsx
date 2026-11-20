@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from "react";
-import { FileCode, Plus, Minus } from "lucide-react";
+import React, { useId, useMemo, useRef, useState } from "react";
+import { Maximize2, X } from "lucide-react";
 
 interface DiffViewerProps {
   before: string;
@@ -67,19 +67,15 @@ function diffLines(a: string[], b: string[]): DiffRow[] {
   return rows;
 }
 
-const CTX_EDGE = 3; // context lines kept visible at each edge of a collapsed run
+const CTX_EDGE = 3;
 
 export const DiffViewer: React.FC<DiffViewerProps> = ({ before, after, path }) => {
   const rows = useMemo(
-    () => diffLines(before.split("\n"), after.split("\n")),
+    () => diffLines(before === "" ? [] : before.split("\n"), after === "" ? [] : after.split("\n")),
     [before, after]
   );
-  const isNewFile = before.trim() === "";
-
-  // Collapsed unchanged runs: run.start = index of first hidden row,
-  // run.hidden = count of hidden rows; CTX_EDGE rows stay visible on each side.
   const collapsedRuns = useMemo(() => {
-    const runs: Array<{ start: number; hidden: number }> = [];
+    const runs = new Map<number, number>();
     let i = 0;
     while (i < rows.length) {
       if (rows[i].type !== "ctx") {
@@ -88,84 +84,111 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ before, after, path }) =
       }
       let end = i;
       while (end < rows.length && rows[end].type === "ctx") end++;
-      const len = end - i;
-      if (len > CTX_EDGE * 2 + 2) {
-        runs.push({ start: i + CTX_EDGE, hidden: len - CTX_EDGE * 2 });
+      if (end - i > CTX_EDGE * 2 + 2) {
+        runs.set(i + CTX_EDGE, end - i - CTX_EDGE * 2);
       }
       i = end;
     }
     return runs;
   }, [rows]);
-
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
-
-  const runAt = (idx: number) =>
-    collapsedRuns.find(
-      (r) => !expanded[r.start] && idx >= r.start && idx < r.start + r.hidden
-    );
-  const markerAt = (idx: number) =>
-    !isNewFile &&
-    collapsedRuns.find((r) => !expanded[r.start] && idx === r.start);
-
-  const rowClasses: Record<RowType, string> = {
-    add: "bg-[#697c651f] text-[#41513d]",
-    del: "bg-[#d86a4f17] text-[#8a3a24]",
-    ctx: "text-secondary",
-  };
+  const [view, setView] = useState<"diff" | "full">("diff");
+  const [showExpandedReview, setShowExpandedReview] = useState(false);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const dialogTitle = useId();
 
   const adds = rows.filter((r) => r.type === "add").length;
   const dels = rows.filter((r) => r.type === "del").length;
 
-  return (
-    <div className="border-t border-stroke bg-chrome overflow-hidden">
-      <div className="px-3 py-1.5 bg-hover flex items-center justify-between text-xxs font-mono text-secondary">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <FileCode className="w-3 h-3 text-accent shrink-0" aria-hidden="true" />
-          <span className="text-primary font-medium truncate">{path}</span>
+  const renderReview = (inDialog: boolean) => {
+    let hideUntil = 0;
+    return (
+      <>
+        <div className="diff-toolbar">
+          <div className="segmented" role="group" aria-label="File review view">
+            <button type="button" className={view === "diff" ? "active" : ""} aria-pressed={view === "diff"} onClick={() => setView("diff")}>Diff</button>
+            <button type="button" className={view === "full" ? "active" : ""} aria-pressed={view === "full"} onClick={() => setView("full")}>Full file</button>
+          </div>
+          <div className="diff-stats">
+            <span className="stat-add" aria-hidden="true">+{adds}</span>
+            <span className="stat-remove" aria-hidden="true">−{dels}</span>
+            <span className="quiet" aria-hidden="true">lines</span>
+            <span className="sr-only">{adds} lines added, {dels} lines removed</span>
+          </div>
+          {!inDialog && (
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="Expand file review"
+              title="Expand file review"
+              onClick={() => {
+                dialogRef.current?.showModal();
+                setShowExpandedReview(true);
+              }}
+            >
+              <Maximize2 className="icon" aria-hidden="true" />
+            </button>
+          )}
         </div>
-        <span className="text-quaternary shrink-0">
-          {isNewFile ? "Created" : `${adds} added · ${dels} removed`}
-        </span>
-      </div>
-
-      <div className="py-1.5 font-mono text-xxs overflow-x-auto max-h-56 overflow-y-auto select-text">
-        {rows.map((row, idx) => {
-          const marker = markerAt(idx);
-          const run = runAt(idx);
-          // Interior rows of a collapsed run are hidden — but the first
-          // hidden row renders the expansion control above it (the control
-          // used to be unreachable because the run check ran first).
-          if (run && !marker) return null;
-
-          return (
-            <React.Fragment key={idx}>
-              {marker && (
-                <button
-                  onClick={() =>
-                    setExpanded((prev) => ({ ...prev, [marker.start]: true }))
-                  }
-                  className="w-full text-left px-3 py-0.5 text-quaternary hover:text-secondary bg-hover"
-                >
-                  ⋯ Show {marker.hidden} unchanged lines
-                </button>
-              )}
-              <div className={`flex items-center px-3 ${rowClasses[row.type]}`}>
-                {row.type === "add" ? (
-                  <Plus className="w-2.5 h-2.5 mr-1.5 shrink-0" aria-hidden="true" />
-                ) : row.type === "del" ? (
-                  <Minus className="w-2.5 h-2.5 mr-1.5 shrink-0" aria-hidden="true" />
-                ) : (
-                  <span className="w-2.5 mr-1.5 shrink-0" aria-hidden="true" />
+        <div className="diff-code select-text" role="region" aria-label={view === "full" ? "Proposed file content" : "Proposed file diff"} tabIndex={0}>
+          {view === "full" ? (
+            <pre className="full-file">{after || "(Empty file)"}</pre>
+          ) : adds + dels === 0 ? (
+            <p className="full-file">No content changes.</p>
+          ) : rows.map((row, idx) => {
+            const hidden = collapsedRuns.get(idx);
+            const isExpanded = expanded[idx] ?? false;
+            if (idx < hideUntil) return null;
+            if (hidden && !isExpanded) hideUntil = idx + hidden;
+            return (
+              <React.Fragment key={idx}>
+                {hidden && (
+                  <button
+                    type="button"
+                    className="diff-context"
+                    aria-expanded={isExpanded}
+                    onClick={() => setExpanded((prev) => ({ ...prev, [idx]: !isExpanded }))}
+                  >
+                    {isExpanded ? "Hide" : "Show"} {hidden} unchanged lines
+                  </button>
                 )}
-                <span className="w-7 text-quaternary select-none shrink-0">
-                  {row.aNum ?? row.bNum ?? ""}
-                </span>
-                <span className="whitespace-pre">{row.text}</span>
-              </div>
-            </React.Fragment>
-          );
-        })}
-      </div>
-    </div>
+                {(!hidden || isExpanded) && (
+                  <div className={`diff-line ${row.type}`}>
+                    <span className="line-num" aria-hidden="true">{row.aNum}</span>
+                    <span className="line-num" aria-hidden="true">{row.bNum}</span>
+                    <span className="sign" aria-hidden="true">{row.type === "add" ? "+" : row.type === "del" ? "-" : " "}</span>
+                    {row.type !== "ctx" && <span className="sr-only">{row.type === "add" ? "Added: " : "Removed: "}</span>}
+                    <span className="code">{row.text || " "}</span>
+                  </div>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </div>
+      </>
+    );
+  };
+
+  return (
+    <>
+      {renderReview(false)}
+      <dialog
+        ref={dialogRef}
+        className="modal wide diff-review-dialog"
+        aria-labelledby={dialogTitle}
+        onClose={() => setShowExpandedReview(false)}
+      >
+        <header className="modal-head">
+          <div className="min-w-0 break-words">
+            <h2 id={dialogTitle}>File review</h2>
+            <p>{path}</p>
+          </div>
+          <button type="button" className="icon-btn shrink-0" aria-label="Close file review" onClick={() => dialogRef.current?.close()}>
+            <X className="icon" aria-hidden="true" />
+          </button>
+        </header>
+        {showExpandedReview && <div className="modal-body">{renderReview(true)}</div>}
+      </dialog>
+    </>
   );
 };

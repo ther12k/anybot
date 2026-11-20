@@ -1,0 +1,109 @@
+.warm-workspace .anybot-settings-dialog {
+  width: min(480px, calc(100% - 24px));
+  max-width: none;
+  max-height: none;
+  overflow: visible;
+}
+
+.warm-workspace .anybot-settings-dialog::backdrop {
+  background: #3a2b4733;
+  backdrop-filter: blur(5px);
+}
+
+.warm-workspace .anybot-settings-dialog .modal-head,
+.warm-workspace .anybot-settings-dialog .modal-footer {
+  flex-shrink: 0;
+}
+
+.warm-workspace .anybot-provider-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.warm-workspace .anybot-provider-field .anybot-provider-input {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 0;
+}
+
+.warm-workspace .anybot-settings .provider-card p,
+.warm-workspace .anybot-settings .field label,
+.warm-workspace .anybot-settings .field small,
+.warm-workspace .anybot-settings .modal-head p,
+.warm-workspace .anybot-settings .settings-row p,
+.warm-workspace .anybot-settings .settings-tabs button {
+  color: var(--sand-text-tertiary);
+}
+
+.warm-workspace .anybot-settings .settings-tabs button.active {
+  color: var(--sand-text-primary);
+}
+
+.warm-workspace .anybot-settings .field input {
+  font-family: var(--sand-font-family-mono);
+  color: var(--sand-text-primary);
+}
+
+.warm-workspace .anybot-provider-field .provider-logo,
+.warm-workspace .anybot-cli-card .provider-logo,
+.warm-workspace .anybot-settings-note > .icon {
+  flex-shrink: 0;
+}
+
+.warm-workspace .anybot-cli-card .tag {
+  flex-shrink: 0;
+}
+
+.warm-workspace .anybot-settings .anybot-settings-note {
+  margin-top: 20px;
+  color: var(--sand-text-secondary);
+}
+
+.warm-workspace .anybot-setting-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.warm-workspace .anybot-settings .toggle:not(.on) {
+  box-shadow: inset 0 0 0 1px var(--sand-border-primary-translucent);
+}
+
+.warm-workspace .anybot-settings .anybot-settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.warm-workspace .page.anybot-settings .anybot-settings-actions {
+  margin-top: 20px;
+}
+
+.warm-workspace .anybot-save-error {
+  flex-basis: 100%;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.warm-workspace .anybot-settings-sections > section + section {
+  margin-top: 24px;
+}
+
+.warm-workspace .anybot-settings .btn[aria-disabled="true"],
+.warm-workspace .anybot-settings .toggle:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.warm-workspace .anybot-settings :is(button, a, input):focus-visible {
+  outline: 2px solid var(--sand-bg-accent-primary);
+  outline-offset: 2px;
+}
+
+@media (max-width: 400px) {
+  .warm-workspace .anybot-settings .anybot-permission-row {
+    gap: 8px;
+  }
+}

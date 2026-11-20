@@ -1,0 +1,36 @@
+/* The app uses live model, mention and run controls in the prototype layout. */
+.warm-workspace .composer-wrap { flex-shrink: 0; }
+.warm-workspace .composer .model-selector,
+.warm-workspace .composer .tools-toggle,
+.warm-workspace .composer-disclaimer,
+.warm-workspace .run-bar,
+.warm-workspace .run-bar .text-link,
+.warm-workspace .composer textarea::placeholder { color: var(--plum); }
+
+.warm-workspace .composer textarea:focus-visible { outline-offset: -3px; border-radius: inherit; }
+.warm-workspace .composer .send-btn { flex-shrink: 0; }
+.warm-workspace .composer .model-selector { max-width: min(100%, 210px); }
+.warm-workspace .composer-model-wrap { min-width: 0; margin-left: auto; }
+.warm-workspace .composer-model-list {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: min(100%, 315px);
+  max-height: min(330px, 52dvh);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 7px;
+  z-index: 15;
+}
+.warm-workspace .composer-model-list .option-item { margin-bottom: 4px; }
+.warm-workspace :is(.mention-menu, .composer-model-list) .modal-label { margin: 4px 8px 7px; }
+.warm-workspace .mention-option[aria-selected="true"] { background: var(--lilac); }
+.warm-workspace .mention-option small,
+.warm-workspace .composer-model-list small { color: var(--plum); }
+
+@media (max-width: 640px) {
+  .warm-workspace .composer .model-selector { max-width: min(100%, 125px); }
+}

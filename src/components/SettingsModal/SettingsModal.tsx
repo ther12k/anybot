@@ -1,417 +1,286 @@
-import React, { useEffect, useRef, useState } from "react";
-import { X, Key, Shield, ShieldCheck, HardDrive, Check, ExternalLink, Loader2, ScrollText, Terminal, Sparkles } from "lucide-react";
+import React, { useEffect, useId, useRef, useState } from "react";
+import { Check, ExternalLink, HardDrive, Key, Loader2, ScrollText, Shield, Sparkles, Terminal, X } from "lucide-react";
 import { VaultConfig, DetectedAgentCli } from "../../types";
-import { TauriBridge } from "../../services/tauri/bridge";
+import { TauriBridge, isTauriEnvironment } from "../../services/tauri/bridge";
+import "./SettingsModal.css";
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   vault: VaultConfig;
   onSaveVault: (updated: VaultConfig) => Promise<boolean>;
+  embedded?: boolean;
 }
 
 type SaveState = "idle" | "saving" | "saved" | "error";
+type CliScan = { state: "loading" | "error" } | { state: "done"; clis: DetectedAgentCli[] };
+type AuditCheck =
+  | { state: "idle" | "checking" }
+  | { state: "done"; result: Awaited<ReturnType<typeof TauriBridge.verifyAuditLog>> }
+  | { state: "error"; message: string };
+
+const sections = [
+  { id: "providers", label: "Providers", Icon: Sparkles },
+  { id: "cli", label: "Local agents", Icon: Terminal },
+  { id: "permissions", label: "Permissions", Icon: Shield },
+] as const;
+
+const apiProviders = [
+  { key: "anthropicApiKey", name: "Anthropic", url: "https://console.anthropic.com/settings/keys", color: "", placeholder: "sk-ant-api03-..." },
+  { key: "openaiApiKey", name: "OpenAI", url: "https://platform.openai.com/api-keys", color: "green", placeholder: "sk-proj-..." },
+  { key: "grokApiKey", name: "xAI (Grok)", url: "https://console.x.ai/", color: "gray", placeholder: "xai-..." },
+] as const;
+
+const defaultOllamaUrl = "http://localhost:11434";
+const draftFromVault = (vault: VaultConfig) => ({
+  anthropicApiKey: vault.anthropicApiKey ?? "",
+  openaiApiKey: vault.openaiApiKey ?? "",
+  grokApiKey: vault.grokApiKey ?? "",
+  ollamaBaseUrl: vault.ollamaBaseUrl || defaultOllamaUrl,
+  autoApproveSafeTools: vault.autoApproveSafeTools ?? true,
+});
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
   vault,
   onSaveVault,
+  embedded = false,
 }) => {
-  const [anthropicApiKey, setAnthropicApiKey] = useState("");
-  const [openaiApiKey, setOpenaiApiKey] = useState("");
-  const [grokApiKey, setGrokApiKey] = useState("");
-  const [ollamaBaseUrl, setOllamaBaseUrl] = useState("http://localhost:11434");
-  const [autoApproveSafeTools, setAutoApproveSafeTools] = useState(true);
+  const desktop = isTauriEnvironment();
+  const [draft, setDraft] = useState(() => draftFromVault(vault));
+  const [tab, setTab] = useState<(typeof sections)[number]["id"]>("providers");
   const [saveState, setSaveState] = useState<SaveState>("idle");
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [detectedClis, setDetectedClis] = useState<DetectedAgentCli[]>([]);
-  const [auditCheck, setAuditCheck] = useState<
-    | { state: "idle" }
-    | { state: "checking" }
-    | { state: "done"; valid: boolean; hashed: number; legacy: number; firstBreak: number | null }
-    | { state: "error"; message: string }
-  >({ state: "idle" });
-
+  const [scan, setScan] = useState<CliScan>({ state: "loading" });
+  const [scanAttempt, setScanAttempt] = useState(0);
+  const [auditCheck, setAuditCheck] = useState<AuditCheck>({ state: "idle" });
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const saveRequest = useRef(0);
+  const id = useId();
 
-  // Drafts always start from the latest loaded vault — fixes overwriting
-  // persisted keys with empty values when the async load was still in flight.
+  useEffect(() => setDraft(draftFromVault(vault)), [vault, isOpen]);
+  useEffect(() => () => { saveRequest.current += 1; }, [isOpen]);
+
   useEffect(() => {
-    setAnthropicApiKey(vault.anthropicApiKey || "");
-    setOpenaiApiKey(vault.openaiApiKey || "");
-    setGrokApiKey(vault.grokApiKey || "");
-    setOllamaBaseUrl(vault.ollamaBaseUrl || "http://localhost:11434");
-    setAutoApproveSafeTools(vault.autoApproveSafeTools ?? true);
-    setSaveState("idle");
-    setSaveError(null);
-
-    if (isOpen) {
-      TauriBridge.detectAgentClis()
-        .then((clis) => setDetectedClis(clis))
-        .catch(() => {});
+    if (!isOpen) {
+      setSaveState("idle");
+      setTab("providers");
+      return;
     }
-  }, [isOpen, vault]);
+    if (!desktop) return;
+    let active = true;
+    setScan({ state: "loading" });
+    TauriBridge.detectAgentClis().then(
+      (clis) => { if (active) setScan({ state: "done", clis }); },
+      () => { if (active) setScan({ state: "error" }); },
+    );
+    return () => { active = false; };
+  }, [desktop, isOpen, scanAttempt]);
 
-  // Native modal semantics: showModal() traps focus, Escape fires `cancel`
-  // and closes, and the `close` event tells React to flip isOpen.
   useEffect(() => {
-    const d = dialogRef.current;
-    if (!d) return;
-    if (isOpen && !d.open) d.showModal();
-    if (!isOpen && d.open) d.close();
-  }, [isOpen]);
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (isOpen && !dialog.open) dialog.showModal();
+    if (!isOpen && dialog.open) dialog.close();
+  }, [embedded, isOpen]);
 
   useEffect(() => {
-    const d = dialogRef.current;
-    if (!d) return;
-    const handleClose = () => {
-      onClose();
-      // Return focus to the trigger so keyboard users don't land on <body>
-      document.getElementById("anybot-settings-trigger")?.focus();
-    };
-    // Escape fallback: some webviews don't fire native `cancel` for
-    // programmatic key events, so listen for the key directly too.
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    d.addEventListener("close", handleClose);
-    d.addEventListener("keydown", onKey);
-    return () => {
-      d.removeEventListener("close", handleClose);
-      d.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+    if (embedded || !isOpen || saveState !== "saved") return;
+    const timeout = window.setTimeout(onClose, 600);
+    return () => window.clearTimeout(timeout);
+  }, [embedded, isOpen, onClose, saveState]);
+
+  const updateDraft = <K extends keyof typeof draft,>(key: K, value: (typeof draft)[K]) => {
+    setDraft((previous) => ({ ...previous, [key]: value }));
+    setSaveState("idle");
+  };
+
+  const saveUnavailable = saveState === "saving" || saveState === "saved";
 
   const handleSave = async () => {
+    if (saveUnavailable) return;
+    const request = ++saveRequest.current;
     setSaveState("saving");
-    setSaveError(null);
-    const ok = await onSaveVault({
-      ...vault,
-      anthropicApiKey: anthropicApiKey.trim(),
-      openaiApiKey: openaiApiKey.trim(),
-      grokApiKey: grokApiKey.trim(),
-      ollamaBaseUrl: ollamaBaseUrl.trim(),
-      autoApproveSafeTools,
-    });
-    if (ok) {
-      setSaveState("saved");
-      setTimeout(onClose, 600);
-    } else {
-      setSaveState("error");
-      setSaveError(
-        "Unable to save settings. Check that ~/.config/anybot/config.json is writable, then try again."
-      );
+    try {
+      const ok = await onSaveVault({
+        ...vault,
+        anthropicApiKey: draft.anthropicApiKey.trim(),
+        openaiApiKey: draft.openaiApiKey.trim(),
+        grokApiKey: draft.grokApiKey.trim(),
+        ollamaBaseUrl: draft.ollamaBaseUrl.trim(),
+        autoApproveSafeTools: draft.autoApproveSafeTools,
+      });
+      if (request === saveRequest.current) setSaveState(ok ? "saved" : "error");
+    } catch {
+      if (request === saveRequest.current) setSaveState("error");
     }
   };
 
-  const inputCls =
-    "w-full h-9 px-3 rounded-xl bg-sidebar border border-stroke text-primary font-mono text-xs placeholder:text-quaternary focus:outline-none focus:border-strokeStrong focus-visible:ring-2 focus-visible:ring-accent select-text";
+  const verifyAudit = async () => {
+    if (!desktop || auditCheck.state === "checking") return;
+    setAuditCheck({ state: "checking" });
+    try {
+      const result = await TauriBridge.verifyAuditLog();
+      setAuditCheck({ state: "done", result });
+    } catch (error) {
+      setAuditCheck({ state: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  };
 
-  const labelCls = "font-semibold text-secondary";
+  const saving = saveState === "saving";
+  const providers = (
+    <section className="settings-section" aria-labelledby={`${id}-providers`}>
+      <h2 id={`${id}-providers`}>Your model connections</h2>
+      <p>{desktop ? "Enter the API keys or local endpoint you want AnyBot to use." : "Set your local endpoint here. Use the desktop app to configure API keys."}</p>
+      {apiProviders.map(({ key, name, url, color, placeholder }) => (
+        <div className="provider-card anybot-provider-field" key={key}>
+          <span className={`provider-logo ${color}`} aria-hidden="true"><Key className="icon" /></span>
+          <div className="min-w-0 grow"><h3>{name}</h3><p>Direct API</p></div>
+          <a className="btn" href={url} target="_blank" rel="noreferrer" aria-label={`Get ${name} API key (opens in a new tab)`}>
+            Get key <ExternalLink className="icon" aria-hidden="true" />
+          </a>
+          <div className="field anybot-provider-input">
+            <label htmlFor={`${id}-${key}`}>{name} API key</label>
+            <input id={`${id}-${key}`} type="password" autoComplete="off" value={desktop ? draft[key] : ""} disabled={saving || !desktop}
+              onChange={(event) => updateDraft(key, event.target.value)} placeholder={placeholder} />
+          </div>
+        </div>
+      ))}
+      <div className="provider-card anybot-provider-field">
+        <span className="provider-logo purple" aria-hidden="true"><HardDrive className="icon" /></span>
+        <div className="min-w-0 grow"><h3>Ollama</h3><p>Local endpoint</p></div>
+        <div className="field anybot-provider-input">
+          <label htmlFor={`${id}-ollama`}>Ollama endpoint</label>
+          <input id={`${id}-ollama`} type="url" value={draft.ollamaBaseUrl} disabled={saving}
+            aria-describedby={`${id}-ollama-note`} onChange={(event) => updateDraft("ollamaBaseUrl", event.target.value)} placeholder={defaultOllamaUrl} />
+          <small id={`${id}-ollama-note`}>AnyBot checks availability when you send a message. File and command tasks require a model that supports tools.</small>
+        </div>
+      </div>
+      <div className="info-banner anybot-settings-note">
+        <Shield className="icon" aria-hidden="true" />
+        <span>{!desktop ? "API keys are not stored in this browser preview." : vault.keychainStorageActive === true
+          ? "API keys are protected by the OS keychain."
+          : vault.keychainStorageActive === false
+            ? "API keys use protected file storage (mode 0600, restricted to owner)."
+            : "API key storage status is not available yet."}</span>
+      </div>
+    </section>
+  );
+
+  const localAgents = (
+    <section className="settings-section" aria-labelledby={`${id}-cli`}>
+      <h2 id={`${id}-cli`}>Bring the tools you already use.</h2>
+      <p>AnyBot detects installed agent CLIs and can use them to run local agents. Detection does not confirm authentication.</p>
+      {!desktop && <p role="status">Detecting installed agent CLIs requires the desktop app.</p>}
+      {desktop && scan.state === "loading" && <p role="status">Looking for installed agent CLIs…</p>}
+      {scan.state === "error" && (
+        <div className="info-banner anybot-settings-note"><p role="alert">Could not check installed agent CLIs.</p>
+          <button type="button" className="btn shrink-0" onClick={() => setScanAttempt((attempt) => attempt + 1)}>Retry</button>
+        </div>
+      )}
+      {scan.state === "done" && (scan.clis.length ? scan.clis.map((cli) => (
+        <div key={cli.engine} className="provider-card anybot-cli-card">
+          <span className="provider-logo gray" aria-hidden="true"><Terminal className="icon" /></span>
+          <div className="min-w-0 grow break-words">
+            <h3>{cli.name}</h3>
+            <p><code>{cli.binary}</code>{cli.is_installed && (cli.version || cli.path) ? ` · ${cli.version || cli.path}` : ""}</p>
+          </div>
+          <span className={`tag ${cli.is_installed ? "green" : "neutral"}`}>{cli.is_installed ? "Installed" : "Not detected"}</span>
+        </div>
+      )) : <p role="status">No agent CLIs reported.</p>)}
+      <div className="info-banner anybot-settings-note"><Terminal className="icon" aria-hidden="true" />
+        <p>CLI access may use a subscription or other provider billing. Usage limits and permissions depend on the CLI.</p>
+      </div>
+    </section>
+  );
+
+  const permissions = (
+    <section className="settings-section" aria-labelledby={`${id}-permissions`}>
+      <h2 id={`${id}-permissions`}>A helpful agent. Clear boundaries.</h2>
+      <p>Control automatic approval for read-only commands and verify the local audit log.</p>
+      <div className="settings-row anybot-permission-row">
+        <div className="min-w-0 grow">
+          <span id={`${id}-approve`} className="anybot-setting-label">Auto-approve safe commands</span>
+          <p id={`${id}-approve-note`}>Auto-approval for eligible read-only shell commands requires this and the agent’s switch to be on. Standing grants are handled separately; file writes always ask.</p>
+        </div>
+        <button type="button" className={`toggle ${draft.autoApproveSafeTools ? "on" : ""}`} role="switch"
+          aria-checked={draft.autoApproveSafeTools} aria-labelledby={`${id}-approve`} aria-describedby={`${id}-approve-note`}
+          disabled={saving} onClick={() => updateDraft("autoApproveSafeTools", !draft.autoApproveSafeTools)} />
+      </div>
+      <div className="settings-row anybot-permission-row">
+        <div className="min-w-0 grow">
+          <span className="anybot-setting-label">Audit log integrity</span>
+          <p role="status" className="break-words">
+            {!desktop ? "Audit verification requires the desktop app." : auditCheck.state === "checking" ? "Verifying the audit chain…" : auditCheck.state === "done" ? (
+              auditCheck.result.valid
+                ? `Audit chain intact — ${auditCheck.result.hashed_rows} verified ${auditCheck.result.hashed_rows === 1 ? "row" : "rows"}${auditCheck.result.legacy_rows > 0 ? ` (+${auditCheck.result.legacy_rows} pre-chain)` : ""}.`
+                : <span className="text-danger">Audit chain broken at row {auditCheck.result.first_break ?? "unknown"}.</span>
+            ) : auditCheck.state === "error" ? (
+              <span className="text-danger">Could not verify the audit log: {auditCheck.message}</span>
+            ) : "Check the tamper-evident chain that links audit entries."}
+          </p>
+        </div>
+        <button type="button" className="btn shrink-0" disabled={!desktop || auditCheck.state === "checking"} onClick={verifyAudit}>
+          <ScrollText className="icon" aria-hidden="true" /> Verify
+        </button>
+      </div>
+    </section>
+  );
+
+  const actions = (
+    <>
+      {saveState === "error" && <p className="anybot-save-error text-danger" role="alert">Unable to save settings. Check that storage is available, then try again.</p>}
+      {!embedded && <button type="button" className="btn" onClick={onClose}>Cancel</button>}
+      <button type="button" className="btn primary" onClick={handleSave} aria-disabled={saveUnavailable}>
+        {saving ? <><Loader2 className="icon motion-safe:animate-spin" aria-hidden="true" /> Saving…</>
+          : saveState === "saved" ? <><Check className="icon" aria-hidden="true" /> Saved</> : "Save changes"}
+      </button>
+      <span className="sr-only" role="status">{saving ? "Saving settings" : saveState === "saved" ? "Settings saved" : ""}</span>
+    </>
+  );
+
+  if (embedded) {
+    if (!isOpen) return null;
+    return (
+      <section className="page anybot-settings" aria-labelledby={`${id}-title`}>
+        <header className="page-header">
+          <div className="grow">
+            <div className="eyebrow">Make yourself at home</div>
+            <h1 id={`${id}-title`}>Your workspace, your way.</h1>
+            <p>Manage model connections, local agents, and permissions.</p>
+          </div>
+        </header>
+        <div className="page-body">
+          <div className="settings-layout">
+            <nav className="settings-tabs" aria-label="Settings sections">
+              {sections.map(({ id: section, label, Icon }) => (
+                <button key={section} type="button" className={tab === section ? "active" : undefined}
+                  aria-current={tab === section ? "true" : undefined} onClick={() => setTab(section)}>
+                  <Icon className="icon" aria-hidden="true" /> {label}
+                </button>
+              ))}
+            </nav>
+            <div className="min-w-0">
+              {tab === "providers" ? providers : tab === "cli" ? localAgents : permissions}
+              <footer className="anybot-settings-actions">{actions}</footer>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   return (
-    <dialog
-      ref={dialogRef}
-      aria-labelledby="settings-title"
-      className="w-[calc(100%-2rem)] max-w-lg bg-chrome border border-stroke rounded-2xl shadow-xl overflow-hidden"
-    >
-      <div className="flex flex-col select-text">
-        {/* Header */}
-        <div className="px-5 h-12 border-b border-stroke flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2">
-            <Key className="w-4 h-4 text-accent" aria-hidden="true" />
-            <h3 id="settings-title" className="text-sm font-semibold text-primary">
-              Settings &amp; API keys
-            </h3>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 text-tertiary hover:text-primary rounded-lg hover:bg-hover transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            aria-label="Close settings"
-          >
-            <X className="w-4 h-4" aria-hidden="true" />
-          </button>
-        </div>
-
-        {/* Content */}
-        <div className="p-5 space-y-4 text-xs max-h-[70vh] overflow-y-auto overscroll-contain">
-          {/* OS Keychain status indicator */}
-          <div className="px-3 py-2 rounded-xl bg-sidebar border border-stroke flex items-center justify-between text-xxs">
-            <div className="flex items-center gap-2 text-secondary">
-              <ShieldCheck className="w-4 h-4 text-success shrink-0" aria-hidden="true" />
-              <span>
-                {vault.keychainStorageActive !== false
-                  ? "Protected by OS Keychain (GNOME Keyring / macOS / Windows)"
-                  : "Protected file storage (mode 0600, restricted to owner)"}
-              </span>
-            </div>
-            <span className="text-quaternary font-mono">mode: 0600</span>
-          </div>
-
-          {/* Hash-chained audit log verification */}
-          <div className="px-3 py-2 rounded-xl bg-sidebar border border-stroke flex items-center justify-between gap-2 text-xxs">
-            <div className="flex items-center gap-2 text-secondary min-w-0">
-              <ScrollText className="w-4 h-4 text-accent shrink-0" aria-hidden="true" />
-              {auditCheck.state === "done" ? (
-                auditCheck.valid ? (
-                  <span className="truncate">
-                    Audit chain intact — {auditCheck.hashed} verified row
-                    {auditCheck.hashed === 1 ? "" : "s"}
-                    {auditCheck.legacy > 0 ? ` (+${auditCheck.legacy} pre-chain)` : ""}
-                  </span>
-                ) : (
-                  <span className="text-danger truncate">
-                    Audit chain BROKEN at row {auditCheck.firstBreak ?? "?"} — the log was
-                    modified after the fact.
-                  </span>
-                )
-              ) : auditCheck.state === "error" ? (
-                <span className="text-danger truncate">{auditCheck.message}</span>
-              ) : (
-                <span className="truncate">
-                  Tamper-evident audit log (each row hashes the previous one)
-                </span>
-              )}
-            </div>
-            <button
-              onClick={async () => {
-                setAuditCheck({ state: "checking" });
-                try {
-                  const v = await TauriBridge.verifyAuditLog();
-                  setAuditCheck({
-                    state: "done",
-                    valid: v.valid,
-                    hashed: v.hashed_rows,
-                    legacy: v.legacy_rows,
-                    firstBreak: v.first_break,
-                  });
-                } catch (e: any) {
-                  setAuditCheck({ state: "error", message: String(e?.message ?? e) });
-                }
-              }}
-              disabled={auditCheck.state === "checking"}
-              className="shrink-0 px-2 py-1 rounded-lg bg-chrome border border-stroke text-secondary hover:bg-hover hover:text-primary transition-colors font-medium disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            >
-              {auditCheck.state === "checking" ? (
-                <Loader2 className="w-3 h-3 motion-safe:animate-spin" aria-hidden="true" />
-              ) : (
-                "Verify"
-              )}
-            </button>
-          </div>
-
-          {/* Bring-Your-Own-Plan (BYOP) & Agent Client Protocol (ACP) detection */}
-          <div className="p-3 rounded-xl bg-sidebar border border-stroke space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5 text-secondary font-semibold">
-                <Sparkles className="w-3.5 h-3.5 text-accent" />
-                <span>Subscription Plans (BYOP &amp; ACP)</span>
-              </div>
-              <span className="text-xxs px-1.5 py-px rounded bg-accent/10 text-accent font-medium">
-                Zero Token Cost
-              </span>
-            </div>
-            <p className="text-xxs text-quaternary leading-relaxed">
-              AnyBot automatically detects installed agent CLIs. Use your existing Claude, ChatGPT, or local agent subscriptions without paying per-token API fees.
-            </p>
-            <div className="grid grid-cols-2 gap-1.5 pt-1">
-              {detectedClis.map((cli) => (
-                <div
-                  key={cli.engine}
-                  className={`px-2.5 py-1.5 rounded-lg border text-xxs flex items-center justify-between ${
-                    cli.is_installed
-                      ? "bg-chrome border-success/30 text-primary"
-                      : "bg-chrome/50 border-stroke text-quaternary"
-                  }`}
-                >
-                  <div className="min-w-0 pr-1">
-                    <div className="font-medium truncate flex items-center gap-1">
-                      <span className={`w-1.5 h-1.5 rounded-full ${cli.is_installed ? "bg-success" : "bg-quaternary"}`} />
-                      {cli.name}
-                    </div>
-                    <div className="text-quaternary font-mono text-[10px] truncate">
-                      {cli.is_installed ? (cli.version || cli.path || "Installed") : "Not detected"}
-                    </div>
-                  </div>
-                  <span className="text-[10px] font-mono text-tertiary uppercase">
-                    {cli.binary}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Anthropic */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label htmlFor="anthropic-key" className={labelCls}>
-                Anthropic API key
-              </label>
-              <a
-                href="https://console.anthropic.com/settings/keys"
-                target="_blank"
-                rel="noreferrer"
-                className="text-xxs text-accent hover:underline flex items-center gap-0.5"
-              >
-                Get key <ExternalLink className="w-3 h-3" aria-hidden="true" />
-              </a>
-            </div>
-            <input
-              id="anthropic-key"
-              type="password"
-              autoComplete="off"
-              value={anthropicApiKey}
-              onChange={(e) => setAnthropicApiKey(e.target.value)}
-              placeholder="sk-ant-api03-..."
-              className={inputCls}
-            />
-          </div>
-
-          {/* OpenAI */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label htmlFor="openai-key" className={labelCls}>
-                OpenAI API key
-              </label>
-              <a
-                href="https://platform.openai.com/api-keys"
-                target="_blank"
-                rel="noreferrer"
-                className="text-xxs text-accent hover:underline flex items-center gap-0.5"
-              >
-                Get key <ExternalLink className="w-3 h-3" aria-hidden="true" />
-              </a>
-            </div>
-            <input
-              id="openai-key"
-              type="password"
-              autoComplete="off"
-              value={openaiApiKey}
-              onChange={(e) => setOpenaiApiKey(e.target.value)}
-              placeholder="sk-proj-..."
-              className={inputCls}
-            />
-          </div>
-
-          {/* xAI */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label htmlFor="grok-key" className={labelCls}>
-                xAI (Grok) API key
-              </label>
-              <a
-                href="https://console.x.ai/"
-                target="_blank"
-                rel="noreferrer"
-                className="text-xxs text-accent hover:underline flex items-center gap-0.5"
-              >
-                Get key <ExternalLink className="w-3 h-3" aria-hidden="true" />
-              </a>
-            </div>
-            <input
-              id="grok-key"
-              type="password"
-              autoComplete="off"
-              value={grokApiKey}
-              onChange={(e) => setGrokApiKey(e.target.value)}
-              placeholder="xai-..."
-              className={inputCls}
-            />
-          </div>
-
-          {/* Ollama */}
-          <div className="space-y-1.5">
-            <label htmlFor="ollama-url" className={`${labelCls} flex items-center gap-1.5`}>
-              <HardDrive className="w-3.5 h-3.5 text-tertiary" aria-hidden="true" />
-              Ollama endpoint (offline models)
-            </label>
-            <input
-              id="ollama-url"
-              type="url"
-              value={ollamaBaseUrl}
-              onChange={(e) => setOllamaBaseUrl(e.target.value)}
-              placeholder="http://localhost:11434"
-              className={inputCls}
-            />
-            <p className="text-xxs text-quaternary">
-              Saved endpoint — availability is checked when you send a message,
-              not assumed. Models that support tools enable file &amp; command
-              tasks; pull deepseek-r1 or llama3.3 for local tool calling.
-            </p>
-          </div>
-
-          {/* Safety */}
-          <div className="p-3.5 rounded-xl bg-sidebar border border-stroke flex items-center justify-between gap-3">
-            <div>
-              <div
-                id="auto-approve-label"
-                className="flex items-center gap-1.5 font-semibold text-secondary mb-0.5"
-              >
-                <Shield className="w-3.5 h-3.5 text-success" aria-hidden="true" />
-                <span>Auto-approve safe commands</span>
-              </div>
-              <p className="text-xxs text-quaternary leading-relaxed">
-                Global switch: read-only commands run automatically when this
-                AND the agent&apos;s own switch are on. Changes always ask first.
-              </p>
-            </div>
-            <button
-              onClick={() => setAutoApproveSafeTools(!autoApproveSafeTools)}
-              role="switch"
-              aria-checked={autoApproveSafeTools}
-              aria-labelledby="auto-approve-label"
-              className={`w-9 h-5 rounded-full transition-colors relative shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-                autoApproveSafeTools ? "bg-success" : "bg-strokeStrong"
-              }`}
-            >
-              <div
-                className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${
-                  autoApproveSafeTools ? "left-[18px]" : "left-0.5"
-                }`}
-              />
-            </button>
-          </div>
-
-          {/* Save failure — names the recovery path */}
-          {saveError && (
-            <p role="alert" className="text-xxs text-danger leading-relaxed">
-              {saveError}
-            </p>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="px-5 py-3 border-t border-stroke bg-sidebar flex items-center justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="px-3.5 py-1.5 rounded-xl border border-stroke bg-elevated hover:bg-elevatedHover text-secondary font-medium text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saveState === "saving"}
-            className="px-4 py-1.5 rounded-xl bg-bubbleUser hover:bg-[#333] text-white font-medium text-xs flex items-center gap-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
-          >
-            {saveState === "saving" ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 motion-safe:animate-spin" aria-hidden="true" />
-                <span>Saving…</span>
-              </>
-            ) : saveState === "saved" ? (
-              <>
-                <Check className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>Saved</span>
-              </>
-            ) : (
-              <span>Save changes</span>
-            )}
-          </button>
-        </div>
+    <dialog ref={dialogRef} aria-labelledby={`${id}-title`} className="anybot-settings-dialog"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); onClose(); } }}>
+      <div className="modal anybot-settings select-text">
+        <header className="modal-head">
+          <div><h2 id={`${id}-title`}>Settings &amp; API keys</h2><p>Manage model connections, local agents, and permissions.</p></div>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close settings"><X className="icon" aria-hidden="true" /></button>
+        </header>
+        <div className="modal-body anybot-settings-sections">{providers}{localAgents}{permissions}</div>
+        <footer className="modal-footer anybot-settings-actions">{actions}</footer>
       </div>
     </dialog>
   );

@@ -1,0 +1,41 @@
+.warm-workspace .anybot-room-dialog {
+  width: min(480px, calc(100% - 24px));
+  max-width: none;
+  max-height: none;
+  overflow: visible;
+}
+
+.warm-workspace .anybot-room-dialog::backdrop {
+  background: #3a2b4733;
+  backdrop-filter: blur(5px);
+}
+
+.warm-workspace .anybot-room-dialog .modal-head,
+.warm-workspace .anybot-room-dialog .modal-footer {
+  flex-shrink: 0;
+}
+
+.warm-workspace .anybot-room-dialog .checkbox-row,
+.warm-workspace .anybot-room-dialog .field label,
+.warm-workspace .anybot-room-dialog .modal-label,
+.warm-workspace .anybot-room-dialog .modal-head p {
+  color: var(--sand-text-tertiary);
+}
+
+.warm-workspace .anybot-room-dialog .checkbox-row input {
+  flex-shrink: 0;
+}
+
+.warm-workspace .anybot-room-dialog .caption-note[role="alert"] {
+  color: var(--sand-bg-danger-primary);
+}
+
+.warm-workspace .anybot-room-dialog :is(button, input):focus-visible {
+  outline: 2px solid var(--sand-bg-accent-primary);
+  outline-offset: 2px;
+}
+
+.warm-workspace .anybot-room-note {
+  color: var(--sand-text-tertiary);
+  font-size: 10px;
+}
