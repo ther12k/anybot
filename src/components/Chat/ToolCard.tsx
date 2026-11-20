@@ -1,18 +1,15 @@
-import React, { useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import {
-  Terminal,
+  Check,
+  CircleX,
   FileText,
   Folder,
-  CheckCircle2,
-  AlertTriangle,
-  XCircle,
-  Loader2,
-  ChevronDown,
-  ChevronRight,
-  ShieldAlert,
-  Play,
-  X,
+  LockKeyhole,
+  Pencil,
+  ShieldCheck,
+  Terminal,
   Users,
+  X,
 } from "lucide-react";
 import { ToolCallItem } from "../../types";
 import { DiffViewer } from "./DiffViewer";
@@ -22,266 +19,187 @@ interface ToolCardProps {
   onApprove?: (toolCallId: string) => void;
   onAlwaysAllow?: (toolCallId: string) => void;
   onReject?: (toolCallId: string) => void;
+  onRequestChanges?: (toolCallId: string, feedback: string) => void;
 }
 
-const TOOL_META: Record<
-  string,
-  { label: string; icon: React.ReactNode; statusText: string }
-> = {
-  execute_shell: {
-    label: "Running commands",
-    icon: <Terminal className="w-3.5 h-3.5" />,
-    statusText: "Shell",
-  },
-  read_file: {
-    label: "Reading a file",
-    icon: <FileText className="w-3.5 h-3.5" />,
-    statusText: "Read",
-  },
-  write_file: {
-    label: "Editing a file",
-    icon: <FileText className="w-3.5 h-3.5" />,
-    statusText: "Write",
-  },
-  list_directory: {
-    label: "Browsing files",
-    icon: <Folder className="w-3.5 h-3.5" />,
-    statusText: "List",
-  },
-  delegate_task: {
-    label: "Delegating to another bot",
-    icon: <Users className="w-3.5 h-3.5" />,
-    statusText: "Handoff",
-  },
+const TOOL_META = {
+  execute_shell: { label: "Run command", Icon: Terminal },
+  read_file: { label: "Read file", Icon: FileText },
+  write_file: { label: "Write file", Icon: FileText },
+  list_directory: { label: "List files", Icon: Folder },
+  delegate_task: { label: "Delegate task", Icon: Users },
 };
+
+const STATUS_META = {
+  pending_approval: { label: "Needs approval", color: "amber", Icon: LockKeyhole },
+  running: { label: "Running", color: "purple", Icon: null },
+  completed: { label: "Done", color: "green", Icon: Check },
+  failed: { label: "Failed", color: "red", Icon: CircleX },
+  rejected: { label: "Rejected", color: "red", Icon: X },
+};
+
+function ToolResult({ toolCall }: { toolCall: ToolCallItem }) {
+  const { result, status } = toolCall;
+  return (
+    <>
+      {result?.error && status !== "pending_approval" && (
+        <div className="state-notice error break-words">
+          <CircleX className="icon shrink-0" aria-hidden="true" />
+          <span className="min-w-0 select-text">{result.error}</span>
+        </div>
+      )}
+      {result?.output && (
+        <details className="tool-output">
+          <summary>Output</summary>
+          <pre tabIndex={0} aria-label="Tool output" className="max-h-44 overflow-auto whitespace-pre-wrap break-words select-text">
+            {result.output}
+          </pre>
+        </details>
+      )}
+    </>
+  );
+}
 
 export const ToolCard: React.FC<ToolCardProps> = ({
   toolCall,
   onApprove,
   onAlwaysAllow,
   onReject,
+  onRequestChanges,
 }) => {
-  const [isOutputExpanded, setIsOutputExpanded] = useState<boolean>(true);
+  const [requestOpen, setRequestOpen] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const requestButton = useRef<HTMLButtonElement>(null);
+  const feedbackInput = useRef<HTMLTextAreaElement>(null);
+  const feedbackId = useId();
+  useEffect(() => {
+    if (requestOpen) feedbackInput.current?.focus();
+  }, [requestOpen]);
+  const { id, name, status, arguments: args, result, proposalId, safetyReason, safetyTier } = toolCall;
+  const { label: toolLabel, Icon: ToolIcon } = TOOL_META[name] ?? { label: name, Icon: Terminal };
+  const { label: statusLabel, color, Icon: StatusIcon } = STATUS_META[status];
+  const pending = status === "pending_approval";
+  const file = name === "write_file";
+  const shell = name === "execute_shell";
+  const diff = result?.diff;
+  const command = String(args.command ?? "");
+  const path = String(diff?.path ?? args.path ?? "");
+  const target = shell ? command : name === "delegate_task" ? String(args.bot ?? "") : path;
+  const task = name === "delegate_task" ? String(args.task ?? "") : "";
+  const isReview = pending || Boolean(diff) || Boolean(shell && proposalId);
+  // Never offer to apply a file write when there is no reviewed snapshot.
+  const canApprove = Boolean(onApprove && (!file || diff));
+  const canRequest = Boolean(onRequestChanges && file && diff);
+  const elapsed = result?.executionTimeMs;
+  const statusText = file && diff && status === "completed" ? "Applied" : statusLabel;
+  const statusMark = status === "running" ? <span className="spinner" aria-hidden="true" /> : StatusIcon && <StatusIcon className="icon" aria-hidden="true" />;
 
-  const meta = TOOL_META[toolCall.name] ?? {
-    label: toolCall.name,
-    icon: <Terminal className="w-3.5 h-3.5" />,
-    statusText: "Tool",
-  };
+  if (!isReview) {
+    return (
+      <div className="tool-stack">
+        <div className={`tool-row${status === "running" ? " active" : ""}`}>
+          {status === "completed" ? <Check className="icon check-mark shrink-0" aria-hidden="true" /> : <ToolIcon className="icon shrink-0" aria-hidden="true" />}
+          <span className="tool-name">{toolLabel}</span>
+          {target && <code className="file-chip min-w-0 truncate select-text" title={target}>{target}</code>}
+          {elapsed !== undefined && <span className="tool-detail shrink-0">{elapsed} ms</span>}
+          <span className={`tool-end tool-status ${color}`}>{statusMark}{statusText}</span>
+        </div>
+        {(task || (shell && command)) && (
+          <details className="tool-output">
+            <summary>{shell ? "Exact command" : "Delegated task"}</summary>
+            <pre className="max-h-44 overflow-auto whitespace-pre-wrap break-words select-text">{shell ? command : task}</pre>
+          </details>
+        )}
+        <ToolResult toolCall={toolCall} />
+      </div>
+    );
+  }
 
-  const getStatusBadge = () => {
-    switch (toolCall.status) {
-      case "pending_approval":
-        return (
-          <span className="flex items-center gap-1 text-xxs font-medium text-[#9d6937]">
-            <AlertTriangle className="w-3 h-3" />
-            Needs approval
-          </span>
-        );
-      case "running":
-        return (
-          <span className="flex items-center gap-1 text-xxs font-medium text-accent">
-            <Loader2 className="w-3 h-3 motion-safe:animate-spin" />
-            Running
-          </span>
-        );
-      case "completed":
-        return (
-          <span className="flex items-center gap-1 text-xxs font-medium text-success">
-            <CheckCircle2 className="w-3 h-3" />
-            Done
-          </span>
-        );
-      case "failed":
-        return (
-          <span className="flex items-center gap-1 text-xxs font-medium text-danger">
-            <XCircle className="w-3 h-3" />
-            Failed
-          </span>
-        );
-      case "rejected":
-        return (
-          <span className="flex items-center gap-1 text-xxs font-medium text-quaternary">
-            <XCircle className="w-3 h-3" />
-            Rejected
-          </span>
-        );
-    }
-  };
-
+  const title = file ? "Proposed file change" : shell ? "Proposed command" : toolLabel;
+  const reason = file
+    ? diff?.existed === false
+      ? "Creates a new file. Review its full contents before applying."
+      : !diff ? "The proposed diff is unavailable. This change cannot be approved here." : null
+    : safetyReason || "Review the exact action before allowing it to continue.";
   return (
-    <div className="rounded-xl border border-stroke bg-elevated overflow-hidden shadow-[0_1px_2px_rgba(28,28,28,0.04)]">
-      {/* Header — Grok action pill style */}
-      <div className="px-3 py-2 flex items-center justify-between gap-2 bg-elevated">
-        <div className="flex items-center gap-2 min-w-0 text-secondary">
-          {meta.icon}
-          <span className="text-xs font-medium truncate">{meta.label}</span>
-          {toolCall.safetyTier && toolCall.safetyTier !== "Safe" && (
-            <span
-              className={`text-xxs px-1.5 py-px rounded font-mono ${
-                toolCall.safetyTier === "Dangerous"
-                  ? "bg-danger/10 text-danger"
-                  : "bg-hover text-tertiary"
-              }`}
-            >
-              {toolCall.safetyTier}
-            </span>
-          )}
+    <section className="proposal-card" aria-label={title}>
+      <div className="proposal-head">
+        <ToolIcon className="icon shrink-0" aria-hidden="true" />
+        <div className="grow min-w-0">
+          <div className="proposal-title">{title}</div>
+          <div className="proposal-subtitle break-words select-text">{file ? path : shell ? name : target}</div>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {toolCall.result?.executionTimeMs !== undefined && (
-            <span className="text-xxs text-quaternary font-mono">
-              {toolCall.result.executionTimeMs}ms
-            </span>
-          )}
-          {getStatusBadge()}
-        </div>
+        <span className={`tag ${color}`}>{statusMark}{statusText}</span>
       </div>
-
-      {/* Arguments preview */}
-      <div className="px-3 py-2 bg-chrome border-t border-stroke text-xs font-mono select-text">
-        {toolCall.name === "execute_shell" && (
-          <div className="flex items-start gap-1.5 text-primary">
-            <span className="text-secondary select-none">$</span>
-            <span className="break-all">{toolCall.arguments.command}</span>
-          </div>
-        )}
-        {(toolCall.name === "read_file" || toolCall.name === "write_file") && (
-          <div className="text-tertiary">
-            <span className="select-none">path: </span>
-            <span className="text-primary">{toolCall.arguments.path}</span>
-          </div>
-        )}
-        {toolCall.name === "list_directory" && (
-          <div className="text-tertiary">
-            <span className="select-none">dir: </span>
-            <span className="text-primary">{toolCall.arguments.path}</span>
-          </div>
-        )}
-        {toolCall.name === "delegate_task" && (
-          <div className="space-y-1">
-            <div className="text-tertiary">
-              <span className="select-none">to: </span>
-              <span className="text-primary">{toolCall.arguments.bot}</span>
-            </div>
-            <div className="text-tertiary break-words">
-              <span className="select-none">task: </span>
-              <span className="text-primary">
-                {String(toolCall.arguments.task || "").slice(0, 200)}
-                {String(toolCall.arguments.task || "").length > 200 ? "…" : ""}
-              </span>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Approval bar — permission card. write_file shows the exact proposed
-          diff above (prepared before approval) and decides Apply / Decline. */}
-      {toolCall.status === "pending_approval" && (
-        <div className="px-3 py-2.5 bg-hover border-t border-stroke flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-xs text-secondary min-w-0">
-            <ShieldAlert className="w-4 h-4 shrink-0 text-accent" />
-            {toolCall.name === "write_file" ? (
-              <span className="truncate">
-                {toolCall.result?.diff?.existed === false
-                  ? "Creates a new file — review the proposed content."
-                  : "Proposed change — review what will be written."}
-              </span>
-            ) : (
-              <span className="truncate">
-                {toolCall.safetyReason || "Allow this action?"}
-              </span>
+      {diff && <DiffViewer before={diff.before} after={diff.after} path={diff.path} />}
+      {shell && <pre className="command-preview whitespace-pre-wrap select-text">{`$ ${command}`}</pre>}
+      {shell && args.cwd && <p className="command-reason break-words select-text">Working directory: {String(args.cwd)}</p>}
+      {pending && reason && <p className="command-reason break-words">{safetyTier && !file ? `${safetyTier} · ` : ""}{reason}</p>}
+      <ToolResult toolCall={toolCall} />
+      {pending && (
+        <>
+          <div className="proposal-foot">
+            {canApprove && (
+              <button type="button" className="btn primary" onClick={() => onApprove?.(id)}>
+                <Check className="icon" aria-hidden="true" />{file ? "Approve & Apply" : "Approve once"}
+              </button>
+            )}
+            {canRequest && (
+              <button type="button" className="btn" ref={requestButton} aria-expanded={requestOpen} aria-controls={requestOpen ? feedbackId : undefined} onClick={() => setRequestOpen(!requestOpen)}>
+                <Pencil className="icon" aria-hidden="true" />Request changes
+              </button>
+            )}
+            {onReject && (
+              <button type="button" className="btn danger" onClick={() => onReject(id)}>
+                <X className="icon" aria-hidden="true" />Reject
+              </button>
+            )}
+            {shell && onAlwaysAllow && (
+              <button type="button" className="btn ghost" onClick={() => onAlwaysAllow(id)}>
+                <LockKeyhole className="icon" aria-hidden="true" />Always allow exact command
+              </button>
             )}
           </div>
-          <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
-            {toolCall.name === "write_file" ? (
-              <>
-                <button
-                  onClick={() => onReject?.(toolCall.id)}
-                  className="px-2.5 py-1 text-xs font-medium text-secondary hover:text-primary bg-elevated border border-stroke hover:bg-elevatedHover rounded-lg transition-colors flex items-center gap-1"
-                >
-                  <X className="w-3 h-3" />
-                  Decline
-                </button>
-                <button
-                  onClick={() => onApprove?.(toolCall.id)}
-                  className="px-3 py-1 text-xs font-medium text-white bg-bubbleUser hover:bg-[#3d3733] rounded-lg transition-colors flex items-center gap-1.5"
-                  title="Apply exactly this reviewed change"
-                >
-                  <Play className="w-3 h-3 fill-current" />
-                  Apply change
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  onClick={() => onReject?.(toolCall.id)}
-                  className="px-2.5 py-1 text-xs font-medium text-secondary hover:text-primary bg-elevated border border-stroke hover:bg-elevatedHover rounded-lg transition-colors flex items-center gap-1"
-                >
-                  <X className="w-3 h-3" />
-                  Deny
-                </button>
-                {toolCall.name === "execute_shell" && onAlwaysAllow && (
-                  <button
-                    onClick={() => onAlwaysAllow(toolCall.id)}
-                    className="px-2.5 py-1 text-xs font-medium text-secondary hover:text-primary bg-elevated border border-stroke hover:bg-elevatedHover rounded-lg transition-colors"
-                    title="Always allow this exact command in this workspace (creates a standing grant)"
-                  >
-                    Always allow
-                  </button>
-                )}
-                <button
-                  onClick={() => onApprove?.(toolCall.id)}
-                  className="px-3 py-1 text-xs font-medium text-white bg-bubbleUser hover:bg-[#3d3733] rounded-lg transition-colors flex items-center gap-1.5"
-                >
-                  <Play className="w-3 h-3 fill-current" />
-                  Approve
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Proposed or applied diff for write_file */}
-      {toolCall.result?.diff && (
-        <DiffViewer
-          before={toolCall.result.diff.before}
-          after={toolCall.result.diff.after}
-          path={toolCall.result.diff.path}
-        />
-      )}
-
-      {/* Failure reason strip — shown even when a diff is present (e.g. a
-          stale proposal that was refused instead of overwriting) */}
-      {toolCall.result?.error && toolCall.status !== "pending_approval" && (
-        <div className="px-3 py-2 bg-chrome border-t border-stroke text-xs text-danger flex items-start gap-1.5">
-          <XCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-          <span className="select-text">{toolCall.result.error}</span>
-        </div>
-      )}
-
-      {/* Output */}
-      {toolCall.result && !toolCall.result.diff && toolCall.result.output && (
-        <div className="border-t border-stroke">
-          <button
-            onClick={() => setIsOutputExpanded(!isOutputExpanded)}
-            className="w-full px-3 py-1.5 bg-chrome flex items-center justify-between text-xxs text-quaternary hover:text-secondary transition-colors"
-          >
-            <span>Output</span>
-            {isOutputExpanded ? (
-              <ChevronDown className="w-3 h-3" />
-            ) : (
-              <ChevronRight className="w-3 h-3" />
-            )}
-          </button>
-          {isOutputExpanded && (
-            <pre className="px-3 py-2 bg-chrome text-xxs font-mono max-h-44 overflow-y-auto whitespace-pre-wrap select-text text-tertiary">
-              {toolCall.result.output}
-            </pre>
+          {canRequest && requestOpen && (
+            <form id={feedbackId} className="review-feedback field" onSubmit={(event) => {
+              event.preventDefault();
+              const notes = feedback.trim();
+              if (!notes) return;
+              onRequestChanges?.(id, notes);
+              setRequestOpen(false);
+              setFeedback("");
+              requestButton.current?.focus();
+            }}>
+              <label htmlFor={`${feedbackId}-input`}>What should be different?</label>
+              <textarea
+                id={`${feedbackId}-input`}
+                ref={feedbackInput}
+                rows={3}
+                value={feedback}
+                onChange={(event) => setFeedback(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape" && !event.nativeEvent.isComposing) {
+                    event.stopPropagation();
+                    setRequestOpen(false);
+                    requestButton.current?.focus();
+                  }
+                }}
+                required
+              />
+              <div className="proposal-foot">
+                <button type="submit" className="btn primary" disabled={!feedback.trim()}>Send feedback</button>
+                <button type="button" className="btn ghost" onClick={() => { setRequestOpen(false); requestButton.current?.focus(); }}>Cancel</button>
+              </div>
+            </form>
           )}
-        </div>
+          {(file || shell) && (
+            <p className="proposal-note">
+              <ShieldCheck className="icon shrink-0" aria-hidden="true" />
+              {file ? "Approval applies only to this reviewed change." : "Approval applies to this exact command. Standing grants are scoped to this workspace."}
+            </p>
+          )}
+        </>
       )}
-    </div>
+    </section>
   );
 };

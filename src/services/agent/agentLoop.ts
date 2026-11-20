@@ -109,7 +109,7 @@ export class AgentLoop {
     vault: VaultConfig,
     onUpdateEntry: (entry: TranscriptEntry) => void,
     onAddEntry: (entry: TranscriptEntry) => void,
-    onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean) => void) => void,
+    onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean, revision?: string) => void) => void,
     /** Team Rooms: persona that authors this run's assistant entries. */
     authorBotId?: string
   ): Promise<RunOutcome> {
@@ -146,7 +146,7 @@ export class AgentLoop {
     vault: VaultConfig,
     onUpdateEntry: (entry: TranscriptEntry) => void,
     onAddEntry: (entry: TranscriptEntry) => void,
-    onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean) => void) => void,
+    onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean, revision?: string) => void) => void,
     run: RunContext,
     authorBotId?: string
   ): Promise<void> {
@@ -345,7 +345,7 @@ export class AgentLoop {
     vault: VaultConfig,
     run: RunContext,
     onUpdate: (tc: ToolCallItem) => void,
-    onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean) => void) => void
+    onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean, revision?: string) => void) => void
   ): Promise<void> {
     /** Mark the tool cancelled — used after every awaited preflight, so a
      *  Stop that lands mid-check never lets the action proceed. */
@@ -468,10 +468,10 @@ export class AgentLoop {
 
       // The wrapped resolver also unregisters itself from the run's pending
       // approvals, so abort() only cancels approvals still awaiting a decision.
-      const approved = await new Promise<boolean>((resolve) => {
-        const wrapped = (v: boolean) => {
+      const { approved, revision } = await new Promise<{ approved: boolean; revision?: string }>((resolve) => {
+        const wrapped = (approved: boolean, revision?: string) => {
           run.pendingApprovals.delete(wrapped);
-          resolve(v);
+          resolve({ approved, revision });
         };
         run.pendingApprovals.add(wrapped);
         onNeedsApproval(toolCall, wrapped);
@@ -490,7 +490,9 @@ export class AgentLoop {
         toolCall.result = {
           error: run.aborted
             ? "Cancelled by user (Stop). Nothing was executed."
-            : "Action declined by user. Nothing was executed.",
+            : revision
+              ? `Action declined by user. Nothing was executed. The user requests these revisions before a new proposal: ${revision}`
+              : "Action declined by user. Nothing was executed.",
           // Keep the proposal visible for reference, marked declined.
           diff: toolCall.result?.diff,
         };

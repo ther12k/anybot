@@ -1,0 +1,45 @@
+/* Additions for real transcript content and native review controls. */
+.warm-workspace .message-byline time,
+.warm-workspace .thinking-toggle,
+.warm-workspace .thinking-detail,
+.warm-workspace .proposal-subtitle,
+.warm-workspace .proposal-note,
+.warm-workspace .command-reason,
+.warm-workspace .diff-line .line-num,
+.warm-workspace .segmented button {
+  color: var(--plum);
+}
+
+.warm-workspace .message-actions .icon-btn:focus-visible { opacity: 1; }
+.warm-workspace .message-text img { max-width: 100%; height: auto; }
+.warm-workspace .message-text pre code { background: none; padding: 0; }
+.warm-workspace .message-text table { display: block; overflow-x: auto; }
+.warm-workspace .thinking-detail[hidden] { display: none; }
+
+.warm-workspace .tool-stack + .tool-stack { margin-top: -8px; }
+.warm-workspace .tool-row .tool-status { display: flex; align-items: center; gap: 4px; color: var(--plum); }
+.warm-workspace .tool-row .tool-status.red { color: var(--sand-bg-danger-primary); }
+.warm-workspace .tool-row .tool-status .icon { width: 12px; height: 12px; }
+.warm-workspace .tool-output { border-top: 1px solid var(--line); color: var(--plum); font-size: 11px; }
+.warm-workspace .tool-output summary { padding: 6px 11px; cursor: pointer; }
+.warm-workspace .tool-output pre { padding: 0 11px 9px; font-family: var(--sand-font-family-mono); }
+
+.warm-workspace .diff-line { width: max-content; min-width: 100%; }
+.warm-workspace .diff-line .line-num { width: auto; min-width: 4ch; }
+.warm-workspace .diff-line.del { color: var(--sand-bg-danger-primary-hover); }
+.warm-workspace .diff-context {
+  padding: 3px 10px;
+  width: 100%;
+  text-align: left;
+  color: var(--plum);
+  background: var(--lilac);
+}
+.warm-workspace .diff-review-dialog:not([open]) { display: none; }
+.warm-workspace .diff-review-dialog[open] { margin: auto; max-width: calc(100% - 24px); }
+.warm-workspace .diff-review-dialog .diff-code { max-height: 58dvh; }
+.warm-workspace .diff-review-dialog .modal-head > div { flex: 1; min-width: 0; }
+.warm-workspace .review-feedback { margin: 0 11px 9px; }
+.warm-workspace .review-feedback label { color: var(--plum); }
+.warm-workspace .review-feedback .proposal-foot { padding: 7px 0 0; border-top: 0; }
+.warm-workspace .diff-code:focus-visible,
+.warm-workspace .tool-output :is(summary, pre):focus-visible { outline: 2px solid var(--plum); outline-offset: -2px; }

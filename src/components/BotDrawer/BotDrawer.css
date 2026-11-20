@@ -1,0 +1,93 @@
+.warm-workspace .anybot-agent-dialog {
+  width: min(480px, calc(100% - 24px));
+  max-width: none;
+  max-height: none;
+  overflow: visible;
+}
+
+.warm-workspace .anybot-agent-dialog::backdrop {
+  background: #3a2b4733;
+  backdrop-filter: blur(5px);
+}
+
+.warm-workspace .anybot-agent-dialog .modal-head,
+.warm-workspace .anybot-agent-dialog .modal-footer {
+  flex-shrink: 0;
+}
+
+.warm-workspace .anybot-agent-identity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 70px;
+  gap: 14px;
+  margin-bottom: 17px;
+}
+
+.warm-workspace .anybot-agent-identity .field {
+  margin: 0;
+}
+
+.warm-workspace .anybot-agent-avatar input {
+  text-align: center;
+}
+
+.warm-workspace .anybot-agent-dialog .field label,
+.warm-workspace .anybot-agent-dialog .field small,
+.warm-workspace .anybot-agent-dialog .settings-row p,
+.warm-workspace .anybot-agent-dialog .modal-head p {
+  color: var(--sand-text-tertiary);
+}
+
+.warm-workspace .anybot-agent-dialog textarea {
+  font-family: var(--sand-font-family-mono);
+}
+
+.warm-workspace .anybot-agent-dialog .anybot-agent-description textarea {
+  min-height: 0;
+  font-family: inherit;
+}
+
+.warm-workspace .anybot-agent-slider :is(label, span),
+.warm-workspace .anybot-agent-label {
+  font-size: 11px;
+}
+
+.warm-workspace .anybot-agent-slider input {
+  width: 100%;
+  accent-color: var(--sand-bg-accent-primary);
+}
+
+.warm-workspace .anybot-agent-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.warm-workspace .anybot-agent-label .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.warm-workspace .anybot-agent-tools {
+  margin-top: 16px;
+}
+
+.warm-workspace .anybot-agent-tools ul {
+  margin-top: 7px;
+}
+
+.warm-workspace .anybot-agent-dialog .toggle:not(.on) {
+  box-shadow: inset 0 0 0 1px var(--sand-border-primary-translucent);
+}
+
+.warm-workspace .anybot-agent-saved:not(:empty) {
+  order: -1;
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--sand-bg-green-primary);
+}
+
+.warm-workspace .anybot-agent-dialog :is(button, input, textarea):focus-visible {
+  outline: 2px solid var(--sand-bg-accent-primary);
+  outline-offset: 2px;
+}

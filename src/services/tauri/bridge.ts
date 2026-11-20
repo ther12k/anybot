@@ -22,7 +22,7 @@ async function safeInvoke<T>(cmd: string, args: Record<string, any> = {}): Promi
   }
   
   // Browser dev mock fallback
-  console.warn(`[Tauri Mock] invoke("${cmd}")`, args);
+  console.warn(`[Tauri Mock] invoke("${cmd}")`);
   if (cmd === "get_system_info") {
     return {
       os: "linux",

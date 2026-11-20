@@ -1,116 +1,114 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Copy, Check } from "lucide-react";
+import { Bot, Check, Copy, GitBranch } from "lucide-react";
 import { TranscriptEntry, BotPersona } from "../../types";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCard } from "./ToolCard";
+import "./chat.css";
 
 interface MessageItemProps {
   entry: TranscriptEntry;
   bot: BotPersona;
+  isStreaming?: boolean;
+  onFork?: () => void;
   onApproveTool?: (toolCallId: string) => void;
   onAlwaysAllowTool?: (toolCallId: string) => void;
   onRejectTool?: (toolCallId: string) => void;
+  onRequestToolChanges?: (toolCallId: string, feedback: string) => void;
 }
 
 export const MessageItem: React.FC<MessageItemProps> = ({
   entry,
   bot,
+  isStreaming = false,
+  onFork,
   onApproveTool,
   onAlwaysAllowTool,
   onRejectTool,
+  onRequestToolChanges,
 }) => {
   const isUser = entry.role === "user";
-  const [copied, setCopied] = React.useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const copyTimer = useRef<ReturnType<typeof setTimeout>>();
+  const timestamp = new Date(entry.timestamp);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(entry.content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  useEffect(() => () => clearTimeout(copyTimer.current), []);
+
+  const handleCopy = async () => {
+    clearTimeout(copyTimer.current);
+    try {
+      await navigator.clipboard.writeText(entry.content);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    copyTimer.current = setTimeout(() => setCopyState("idle"), 2000);
   };
 
-  /* ── User turn: Grok-style black bubble, right-aligned, max 640px ── */
-  if (isUser) {
-    return (
-      <div className="w-full flex justify-end px-6 py-1.5">
-        <div
-          className="max-w-[min(640px,100%)] rounded-bubble bg-bubbleUser px-4 py-2 text-white select-text"
-          style={{ minWidth: "min(100%, 48px)" }}
-        >
-          <p className="text-base whitespace-pre-wrap break-words">
-            {entry.content}
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  /* ── Agent turn: flat on chrome, sender row + thinking + prose + tool cards ── */
   return (
-    <div className="w-full px-6 py-2 group">
-      {/* Sender row — avatar + name (Grok transcript sender line) */}
-      <div className="flex items-center gap-2 mb-1">
-        <div className="w-5 h-5 rounded-full bg-bubbleUser flex items-center justify-center text-[10px] leading-none select-none">
-          {bot.avatar || "⚡"}
+    <article className="message">
+      <span className={`avatar${isUser ? " user" : ""}`} aria-hidden="true">
+        {isUser ? "YO" : bot.avatar || <Bot className="icon" />}
+      </span>
+      <div className="message-body">
+        <div className="message-byline">
+          <span className="min-w-0 break-words">{isUser ? "You" : bot.name}</span>
+          {Number.isFinite(timestamp.getTime()) && (
+            <time dateTime={timestamp.toISOString()}>
+              {timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            </time>
+          )}
         </div>
-        <span className="text-xs font-semibold text-secondary">
-          {bot.name}
-        </span>
-        <span className="text-xxs text-quaternary font-mono">
-          {new Date(entry.timestamp).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          })}
-        </span>
-
-        {entry.content && (
-          <button
-            onClick={handleCopy}
-            className="ml-auto text-quaternary hover:text-primary transition-colors p-1 rounded-md opacity-0 group-hover:opacity-100"
-            title="Copy message"
-          >
-            {copied ? (
-              <Check className="w-3.5 h-3.5 text-success" />
-            ) : (
-              <Copy className="w-3.5 h-3.5" />
+        {isUser ? (
+          <div className="user-bubble whitespace-pre-wrap break-words select-text">
+            {entry.content}
+          </div>
+        ) : (
+          <>
+            {entry.thinking && (
+              <ThinkingBlock
+                thinking={entry.thinking}
+                isActive={entry.isThinkingActive}
+                durationMs={entry.thinkingDurationMs}
+              />
             )}
-          </button>
+            {(entry.content || isStreaming) && (
+              <div className="message-text transcript-prose break-words select-text">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.content}</ReactMarkdown>
+                {isStreaming && <span className="stream-cursor" aria-hidden="true" />}
+              </div>
+            )}
+            {entry.toolCalls?.map((toolCall) => (
+              <ToolCard
+                key={toolCall.id}
+                toolCall={toolCall}
+                onApprove={onApproveTool}
+                onAlwaysAllow={onAlwaysAllowTool}
+                onReject={onRejectTool}
+                onRequestChanges={onRequestToolChanges}
+              />
+            ))}
+            {!isStreaming && (entry.content || onFork) && (
+              <div className="message-actions">
+                {entry.content && (
+                  <button type="button" className="icon-btn" onClick={handleCopy} title="Copy response" aria-label="Copy response">
+                    {copyState === "copied" ? <Check className="icon" aria-hidden="true" /> : <Copy className="icon" aria-hidden="true" />}
+                  </button>
+                )}
+                {onFork && (
+                  <button type="button" className="icon-btn" onClick={onFork} title="Continue in a new chat" aria-label="Continue in a new chat">
+                    <GitBranch className="icon" aria-hidden="true" />
+                  </button>
+                )}
+                <span role="status" className={copyState === "failed" ? "text-xs self-center" : "sr-only"}>
+                  {copyState === "copied" ? "Response copied" : copyState === "failed" ? "Could not copy response" : ""}
+                </span>
+              </div>
+            )}
+          </>
         )}
       </div>
-
-      {/* Thinking drawer */}
-      {entry.thinking && (
-        <ThinkingBlock
-          thinking={entry.thinking}
-          isActive={entry.isThinkingActive}
-          durationMs={entry.thinkingDurationMs}
-        />
-      )}
-
-      {/* Agent prose — flat, 14px / 22px line height */}
-      {entry.content && (
-        <div className="transcript-prose text-primary select-text max-w-[min(720px,100%)]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>
-            {entry.content}
-          </ReactMarkdown>
-        </div>
-      )}
-
-      {/* Tool action cards */}
-      {entry.toolCalls && entry.toolCalls.length > 0 && (
-        <div className="mt-1.5 space-y-2 max-w-[min(720px,100%)]">
-          {entry.toolCalls.map((tc) => (
-            <ToolCard
-              key={tc.id}
-              toolCall={tc}
-              onApprove={onApproveTool}
-              onAlwaysAllow={onAlwaysAllowTool}
-              onReject={onRejectTool}
-            />
-          ))}
-        </div>
-      )}
-    </div>
+    </article>
   );
 };
