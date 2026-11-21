@@ -2,15 +2,16 @@ use crate::models::{CommandSafetyResult, CommandSafetyTier};
 use crate::policy::{load_policy, load_standing_grants_sync, Policy, StandingGrant, COMPOUND_MARKERS};
 
 /// Commands that are read-only *only* with no arguments. With arguments they
-/// execute or reconfigure: `env touch x` runs a program, `hostname new-name`
-/// renames the machine. Any argument → approval, fail closed.
-const ZERO_ARG_READ_ONLY: &[&str] = &["env", "hostname"];
+/// execute or reconfigure: `hostname new-name` renames the machine. Any
+/// argument → approval, fail closed. (`env` is excluded entirely: even bare,
+/// it dumps the whole inherited environment into model context.)
+const ZERO_ARG_READ_ONLY: &[&str] = &["hostname"];
 
 /// Evaluate a shell command against the loaded policy and standing grants.
 ///
 /// Decision order (deny-before-allow, OpenBot-style):
-///   1. Dangerous deny patterns        → Dangerous (never auto-run)
-///   2. deny_commands list             → Mutative (never auto-run, even if granted)
+///   1. Dangerous deny patterns        → Denied (unconditionally blocked)
+///   2. deny_commands list             → Denied (unconditionally blocked)
 ///   3. Compound/redirect/background   → Mutative (never inherits a safe prefix)
 ///   4. Standing grant (exact + cwd)   → Safe (explicit prior user consent)
 ///   5. Read-only allowlist, with argument validation for forms that are
@@ -46,10 +47,11 @@ pub fn evaluate_with_policy(
         );
     }
 
-    // 1. Dangerous patterns — flagged, never auto-run.
+    // 1. Dangerous patterns — unconditionally blocked. No approval,
+    //    proposal, or standing grant can override a deny rule.
     if policy.deny_patterns.iter().any(|p| lower.contains(p.to_lowercase().as_str())) {
         return out(
-            CommandSafetyTier::Dangerous,
+            CommandSafetyTier::Denied,
             true,
             "Matched a deny pattern for potentially catastrophic system destruction.",
             false,
@@ -59,12 +61,12 @@ pub fn evaluate_with_policy(
     let tokens: Vec<&str> = lower.split_whitespace().collect();
     let first_word = tokens.first().copied().unwrap_or("");
 
-    // 2. Denied commands — approval always, grants cannot override.
+    // 2. Denied commands — unconditionally blocked; grants cannot override.
     if policy.deny_commands.iter().any(|c| c.eq_ignore_ascii_case(first_word)) {
         return out(
-            CommandSafetyTier::Mutative,
+            CommandSafetyTier::Denied,
             true,
-            "Command is on the deny list; approval is always required.",
+            "Command is on the deny list.",
             false,
         );
     }
@@ -260,9 +262,7 @@ mod tests {
             "grep -r foo .",
             "node -v",
             "pwd",
-            "env",
             "hostname",
-            "printenv HOME",
             "git branch -a",
             "git branch --list main",
             "git remote -v",
@@ -276,6 +276,30 @@ mod tests {
             assert_eq!(res.tier, CommandSafetyTier::Safe, "expected safe: {cmd}");
             assert!(!res.requires_confirmation, "expected no approval: {cmd}");
             assert!(!res.standing_grant, "not a grant: {cmd}");
+        }
+    }
+
+    #[test]
+    fn environment_inspection_requires_approval() {
+        // `env`/`printenv` dump the whole inherited environment into model
+        // context; they are deliberately not auto-run.
+        for cmd in ["env", "printenv HOME", "printenv"] {
+            let res = evaluate_with_policy(cmd, &policy(), &[], None);
+            assert_eq!(res.tier, CommandSafetyTier::Mutative, "expected approval: {cmd}");
+            assert!(res.requires_confirmation);
+        }
+    }
+
+    #[test]
+    fn deny_rules_are_unconditional() {
+        let mut p = policy();
+        p.deny_commands = vec!["curl".to_string()];
+        let grants = [StandingGrant::Simple("curl http://example.com".to_string())];
+        for cmd in ["curl http://example.com", "rm -rf /"] {
+            let res = evaluate_with_policy(cmd, &p, &grants, None);
+            assert_eq!(res.tier, CommandSafetyTier::Denied, "expected denied: {cmd}");
+            assert!(res.requires_confirmation);
+            assert!(!res.standing_grant, "a grant must never revive a denied command");
         }
     }
 
@@ -402,8 +426,9 @@ mod tests {
 
     #[test]
     fn test_dangerous_commands() {
+        // Deny patterns are now unconditionally blocked, not approvable.
         let res = evaluate_with_policy("rm -rf /", &policy(), &[], None);
-        assert_eq!(res.tier, CommandSafetyTier::Dangerous);
+        assert_eq!(res.tier, CommandSafetyTier::Denied);
         assert!(res.requires_confirmation);
     }
 
@@ -452,9 +477,9 @@ mod tests {
             StandingGrant::Simple("sudo apt install x".to_string()),
             StandingGrant::Simple("cat a > b".to_string()),
         ];
-        // Dangerous pattern still wins over the grant.
+        // Deny pattern still wins over the grant — and is now absolute.
         let res = evaluate_with_policy("rm -rf /", &policy(), &grants, None);
-        assert_eq!(res.tier, CommandSafetyTier::Dangerous);
+        assert_eq!(res.tier, CommandSafetyTier::Denied);
         assert!(res.requires_confirmation);
         // Compound syntax still wins.
         let res = evaluate_with_policy("cat a > b", &policy(), &grants, None);

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,12 @@ pub fn sha256_hex(data: &[u8]) -> String {
     let bytes = hasher.finalize();
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
+
+/// Process-global monotonic counter: proposal ids must never collide.
+/// Two proposals created in the same millisecond previously produced the
+/// same id, silently overwriting each other in the registry — one review
+/// could then authorize the other's action.
+static PROPOSAL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -101,7 +108,12 @@ pub async fn create_write_proposal(
     };
 
     let content_sha256 = sha256_hex(content.as_bytes());
-    let id = format!("prop_w_{}_{:x}", now_ms(), now_ms() ^ 0x5a5a);
+    let id = format!(
+        "prop_w_{}_{:x}_{}",
+        now_ms(),
+        now_ms() ^ 0x5a5a,
+        PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
 
     let proposal = Proposal {
         id: id.clone(),
@@ -139,7 +151,12 @@ pub async fn create_shell_proposal(
     cwd: Option<String>,
     run_id: Option<String>,
 ) -> Result<ShellProposalView, String> {
-    let id = format!("prop_s_{}_{:x}", now_ms(), now_ms() ^ 0xa5a5);
+    let id = format!(
+        "prop_s_{}_{:x}_{}",
+        now_ms(),
+        now_ms() ^ 0xa5a5,
+        PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
 
     let proposal = Proposal {
         id: id.clone(),

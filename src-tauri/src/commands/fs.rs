@@ -15,6 +15,31 @@ fn audit_fs(tool: &str, outcome: &str, path: &str, decision: &str, error: Option
     }));
 }
 
+/// Best-effort screen of a shell command for literal references to the
+/// protected governance files, so the shell route cannot read what
+/// `read_file_content` refuses. Splits on whitespace, strips quotes, and
+/// expands a leading `~`. String screening, not a sandbox: compound or
+/// obfuscated forms already require approval scrutiny elsewhere.
+pub fn command_touches_protected_path(command: &str) -> Option<String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    for raw in command.split_whitespace() {
+        let token = raw.trim_matches(|c| c == '\'' || c == '"' || c == '`');
+        let candidate = if let Some(rest) = token.strip_prefix("~/") {
+            format!("{home}/{rest}")
+        } else if token == "~" {
+            home.clone()
+        } else {
+            token.to_string()
+        };
+        if is_protected_path(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// The app's own governance files (API keys, policy, grants, audit log)
 /// must never enter model context or be writable by tools — an unrestricted
 /// read would otherwise exfiltrate stored credentials, and a write could
@@ -97,34 +122,32 @@ pub async fn write_file_content(
     decision: Option<String>,
     proposal_id: Option<String>,
 ) -> Result<FileWriteResult, String> {
-    // Trust boundary:
-    // 1. If a proposal_id is provided, consume and validate the approved proposal natively.
-    // 2. If decision is "approved" without proposal_id, accept legacy/test calls only if proposal_id is not enforced,
-    //    but enforce proposal validation whenever proposal_id is provided or decision is unapproved.
-    if let Some(prop_id) = &proposal_id {
-        consume_write_proposal(prop_id, &path, &content).map_err(|e| {
-            audit_fs(
-                "write_file",
-                "blocked",
-                &path,
-                "proposal_invalid",
-                Some(&e),
-            );
-            e
-        })?;
-    } else if decision.as_deref() != Some("approved") {
+    // Trust boundary: every write requires a single-use native proposal
+    // bound to this exact path and content. A renderer-supplied "approved"
+    // string is not proof of human consent and is not accepted.
+    let Some(prop_id) = &proposal_id else {
         audit_fs(
             "write_file",
             "blocked",
             &path,
             decision.as_deref().unwrap_or("none"),
-            Some("write without recorded approval or proposal token"),
+            Some("write without an approved proposal token"),
         );
         return Err(
-            "Blocked by policy: file writes require an approved proposal token or user approval decision."
+            "Blocked by policy: file writes require an approved single-use proposal token."
                 .to_string(),
         );
-    }
+    };
+    consume_write_proposal(prop_id, &path, &content).map_err(|e| {
+        audit_fs(
+            "write_file",
+            "blocked",
+            &path,
+            "proposal_invalid",
+            Some(&e),
+        );
+        e
+    })?;
 
     if is_protected_path(&path) {
         let msg = "PROTECTED: this file is part of AnyBot's own configuration and cannot be modified by tools.".to_string();

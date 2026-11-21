@@ -470,27 +470,35 @@ pub async fn run_acp_prompt(
 /// Cancel a running ACP agent session using process group SIGKILL on Unix.
 #[tauri::command]
 pub fn kill_acp_session(session_id: String) -> Result<bool, String> {
-    let pid_opt = {
-        let mut map = RUNNING_ACP.lock().map_err(|e| e.to_string())?;
-        map.remove(&session_id)
+    let pid = {
+        let map = RUNNING_ACP.lock().map_err(|e| e.to_string())?;
+        map.get(&session_id).copied()
     };
 
-    if let Some(pid) = pid_opt {
-        #[cfg(unix)]
-        {
-            let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-            if rc != 0 {
-                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-            }
+    let Some(pid) = pid else {
+        // Already finished — nothing to kill, not an error.
+        return Ok(false);
+    };
+
+    #[cfg(unix)]
+    {
+        let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        if rc != 0 {
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         }
-        #[cfg(not(unix))]
-        {
-            log::warn!("Process group kill not supported on Windows (PID {pid})");
+        // Forget the session only once termination has actually been sent;
+        // claiming success for a live process would be dishonest.
+        if let Ok(mut map) = RUNNING_ACP.lock() {
+            map.remove(&session_id);
         }
         return Ok(true);
     }
 
-    Ok(false)
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Err("Stopping agent sessions is not supported on this platform.".to_string())
+    }
 }
 
 #[cfg(test)]
