@@ -211,6 +211,10 @@ async function streamAnthropic(
   // A transport EOF is NOT completion: Anthropic must deliver message_stop,
   // otherwise the response was cut off mid-turn.
   let sawMessageStop = false;
+  let stopReason: string | null = null;
+  // Set when a tool block carries malformed JSON; thrown after the loop so
+  // the per-frame "continue parsing" catch cannot swallow it.
+  let malformedToolCall: string | null = null;
 
   while (true) {
     const { done, value } = await readWithWatchdog(() => reader.read(), signal);
@@ -243,6 +247,11 @@ async function streamAnthropic(
       if (parsed.type === "message_stop") {
         sawMessageStop = true;
       }
+      // The terminal event proves transport ended — the stop_reason says
+      // whether the answer itself completed. Truncation is not success.
+      if (parsed.type === "message_delta" && parsed.delta?.stop_reason) {
+        stopReason = String(parsed.delta.stop_reason);
+      }
 
       try {
         if (parsed.type === "content_block_start") {
@@ -268,11 +277,17 @@ async function streamAnthropic(
           }
         } else if (parsed.type === "content_block_stop") {
           if (currentToolCall) {
-            let args = {};
-            try {
-              args = JSON.parse(currentToolCall.argumentsStr || "{}");
-            } catch (e) {
-              args = {};
+            // Malformed tool arguments are never repaired to {}: an
+            // empty-argument mutation is worse than a failed turn.
+            let args: any = {};
+            if (currentToolCall.argumentsStr.trim()) {
+              try {
+                args = JSON.parse(currentToolCall.argumentsStr);
+              } catch {
+                malformedToolCall = currentToolCall.name || "a tool call";
+                currentToolCall = null;
+                continue;
+              }
             }
             callbacks.onToolCall?.({
               id: currentToolCall.id,
@@ -295,6 +310,20 @@ async function streamAnthropic(
   if (!sawMessageStop) {
     throw new Error(
       "The response stream ended before the model finished (no completion event). The partial answer above may be incomplete — send again to continue."
+    );
+  }
+
+  if (malformedToolCall) {
+    throw new Error(
+      `The model emitted malformed tool arguments for ${malformedToolCall} — nothing was executed. Send again to retry.`
+    );
+  }
+
+  // A terminal event with a truncation reason is not a completed answer:
+  // no tool calls are flushed as if they were usable instructions.
+  if (stopReason === "max_tokens") {
+    throw new Error(
+      "The model stopped early (stop_reason: max_tokens); the answer may be incomplete and no tool actions were run. Try again, narrow the request, or raise the model's output limit."
     );
   }
 
@@ -465,13 +494,26 @@ async function streamOpenAI(
     );
   }
 
-  // Flush accumulated tool calls
+  // A terminal marker with a truncation/filter reason proves transport
+  // ended, not that the answer completed. No tool calls are flushed.
+  if (finishReason === "length" || finishReason === "content_filter") {
+    throw new Error(
+      `The model stopped early (finish_reason: ${finishReason}); the answer may be incomplete and no tool actions were run. Try again, narrow the request, or raise the model's output limit.`
+    );
+  }
+
+  // Flush accumulated tool calls. Malformed arguments are never repaired
+  // to {}: an empty-argument mutation is worse than a failed turn.
   for (const tc of Object.values(toolCallAccumulators)) {
-    let args = {};
-    try {
-      args = JSON.parse(tc.args || "{}");
-    } catch (e) {
-      args = {};
+    let args: any = {};
+    if (tc.args.trim()) {
+      try {
+        args = JSON.parse(tc.args);
+      } catch {
+        throw new Error(
+          `The model emitted malformed tool arguments for ${tc.name || "a tool call"} — nothing was executed. Send again to retry.`
+        );
+      }
     }
     callbacks.onToolCall?.({
       id: tc.id,
@@ -668,14 +710,32 @@ async function streamAcpAgent(
     ? `[System Instructions]\n${systemPrompt}\n\n[User Request]\n${promptText}`
     : promptText;
 
-  // Listen to abort signal to kill the agent process group
+  // Completion is the CLI's terminal event (process exit), not the launch
+  // acknowledgement: run_acp_prompt resolves as soon as the child spawns.
+  // Waiting for the real terminal keeps Stop effective until the process
+  // is actually dead and drops events that arrive after settlement.
+  let settled = false;
+  let terminal: "finished" | "error" | "aborted" | null = null;
+  let terminalError: string | null = null;
+  let resolveTerminal: () => void = () => {};
+  const settledPromise = new Promise<void>((resolve) => {
+    resolveTerminal = resolve;
+  });
+  const settle = (outcome: "finished" | "error" | "aborted", error?: string) => {
+    if (settled) return;
+    settled = true;
+    terminal = outcome;
+    terminalError = error ?? null;
+    resolveTerminal();
+  };
+
   const abortListener = () => {
-    TauriBridge.killAcpSession(sessionId).catch(() => {});
+    TauriBridge.killAcpSession(sessionId).catch(() => {
+      // A failed kill still surfaces through the child-wait error event.
+    });
+    settle("aborted");
   };
   signal?.addEventListener("abort", abortListener, { once: true });
-
-  let sawFinished = false;
-  let hasError: string | null = null;
 
   try {
     await TauriBridge.runAcpPrompt(
@@ -684,8 +744,7 @@ async function streamAcpAgent(
       fullPrompt,
       undefined,
       (event) => {
-        if (signal?.aborted) return;
-
+        if (settled) return; // no event acts on a finished turn
         switch (event.event_type) {
           case "thinking":
             if (event.text) {
@@ -716,22 +775,25 @@ async function streamAcpAgent(
             }
             break;
           case "finished":
-            sawFinished = true;
+            settle("finished");
             break;
           case "error":
-            hasError = event.error || "ACP Agent encountered an error.";
+            settle("error", event.error || "ACP Agent encountered an error.");
             break;
         }
       }
     );
+    // The invoke above only proves the CLI launched. Real completion is the
+    // terminal event from the native child-wait task, or an abort.
+    await settledPromise;
   } finally {
     signal?.removeEventListener("abort", abortListener);
   }
 
   if (signal?.aborted) return;
 
-  if (hasError) {
-    throw new Error(hasError);
+  if (terminal === "error") {
+    throw new Error(terminalError || "ACP Agent encountered an error.");
   }
 
   callbacks.onFinished?.();

@@ -36,8 +36,8 @@ pub struct Policy {
     /// Substrings that flag a command as Dangerous (never auto-run, always
     /// surfaced as destructive). Evaluated first.
     pub deny_patterns: Vec<String>,
-    /// Commands that may never auto-run even if standing-granted or
-    /// allowlisted. Still runnable after explicit approval.
+    /// Commands that are blocked unconditionally: no approval path,
+    /// proposal token, or standing grant can execute them.
     pub deny_commands: Vec<String>,
     /// Read-only commands eligible for auto-run.
     pub allow_read_only: Vec<String>,
@@ -73,7 +73,7 @@ fn default_read_only() -> Vec<String> {
     [
         "ls", "dir", "pwd", "cat", "head", "tail", "wc", "file", "stat", "du",
         "df", "which", "whereis", "whoami", "id", "uname", "date", "uptime",
-        "echo", "printf", "env", "printenv", "hostname", "ps", "w",
+        "echo", "printf", "hostname", "ps", "w",
         "grep", "rg",
     ]
     .iter()

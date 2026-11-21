@@ -378,6 +378,17 @@ export class AgentLoop {
       toolCall.arguments.cwd = cwd;
       safetyTier = safety.tier;
       safetyReason = safety.reason;
+      if (safety.tier === "Denied") {
+        // Deny rules are absolute: no proposal is created, nothing the user
+        // can click will approve this into execution — and the native shell
+        // endpoint enforces the same refusal independently.
+        toolCall.status = "rejected";
+        toolCall.result = {
+          error: `Blocked by policy: ${safety.reason} Nothing was executed; deny rules cannot be overridden by approval.`,
+        };
+        onUpdate(toolCall);
+        return;
+      }
       if (safety.standing_grant) {
         // Exact match on a prior "Always allow" (scoped to this workspace);
         // deny rules ran first in Rust.

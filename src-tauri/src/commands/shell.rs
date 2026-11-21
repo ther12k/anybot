@@ -5,7 +5,8 @@ use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
-use crate::models::{CommandSafetyResult, ShellCommandResult};
+use crate::commands::fs::command_touches_protected_path;
+use crate::models::{CommandSafetyResult, CommandSafetyTier, ShellCommandResult};
 use crate::policy::{audit, load_policy, load_standing_grants_sync};
 use crate::proposal::consume_shell_proposal;
 use crate::security::{evaluate_command_safety, evaluate_with_policy};
@@ -135,10 +136,10 @@ fn audit_shell(
 /// `call_id` while it runs, and collect stdout/stderr/exit status. Every
 /// finished execution writes one audit row.
 ///
-/// Trust boundary: the frontend's `decision` string is verified, not
-/// trusted — the policy is re-evaluated here against the CURRENT policy
-/// file and grants. A command that needs approval requires a valid native
-/// proposal token or recorded approval.
+/// Trust boundary: the frontend's `decision` string is ignored for
+/// approval — the policy is re-evaluated here against the CURRENT policy
+/// file and grants, and an approval-required command is executed only
+/// against a valid single-use native proposal token.
 pub async fn run_tracked(
     command: String,
     cwd: Option<String>,
@@ -153,24 +154,47 @@ pub async fn run_tracked(
     let policy = load_policy();
     let grants = load_standing_grants_sync();
     let safety = evaluate_with_policy(&command, &policy, &grants, cwd.as_deref());
+
+    // Deny rules are absolute: no proposal token, approval, or standing
+    // grant may execute a denied command.
+    if matches!(safety.tier, CommandSafetyTier::Denied) {
+        let ms = start_time.elapsed().as_millis();
+        audit_shell(&command, "denied", "denied", None, Some(ms), &call_id, proposal_id.as_deref());
+        return Err(format!(
+            "Blocked by policy: {} Nothing was executed; deny rules cannot be overridden by approval.",
+            safety.reason
+        ));
+    }
+
+    // Governance files must stay unreachable through the shell route as well
+    // as the file tools. Best-effort literal screening, not a sandbox:
+    // obfuscated or compound forms already require approval scrutiny.
+    if let Some(token) = command_touches_protected_path(&command) {
+        let ms = start_time.elapsed().as_millis();
+        audit_shell(&command, "blocked_protected", "blocked", None, Some(ms), &call_id, proposal_id.as_deref());
+        return Err(format!(
+            "PROTECTED: {token} is part of AnyBot's own configuration and cannot be read or modified by tools."
+        ));
+    }
+
     let decision = if safety.requires_confirmation {
-        if let Some(prop_id) = &proposal_id {
-            consume_shell_proposal(prop_id, &command, cwd.as_deref()).map_err(|e| {
-                let ms = start_time.elapsed().as_millis();
-                audit_shell(&command, "blocked", "proposal_invalid", None, Some(ms), &call_id, proposal_id.as_deref());
-                e
-            })?;
-            "approved".to_string()
-        } else if decision.as_deref() == Some("approved") {
-            "approved".to_string()
-        } else {
+        // An approval-required mutation must carry a single-use native
+        // proposal token bound to this exact command. A renderer-supplied
+        // "approved" string is not proof of human consent.
+        let Some(prop_id) = &proposal_id else {
             let ms = start_time.elapsed().as_millis();
             audit_shell(&command, "blocked", "blocked", None, Some(ms), &call_id, None);
             return Err(
                 "Blocked by policy: this command requires user approval via a valid proposal token."
                     .to_string(),
             );
-        }
+        };
+        consume_shell_proposal(prop_id, &command, cwd.as_deref()).map_err(|e| {
+            let ms = start_time.elapsed().as_millis();
+            audit_shell(&command, "blocked", "proposal_invalid", None, Some(ms), &call_id, proposal_id.as_deref());
+            e
+        })?;
+        "approved".to_string()
     } else if safety.standing_grant {
         "standing_grant".to_string()
     } else {
@@ -351,13 +375,18 @@ mod tests {
 
     #[tokio::test]
     async fn kill_stops_long_running_command() {
+        use crate::proposal::{approve_proposal, create_shell_proposal};
+        let prop = create_shell_proposal("sleep 30".into(), None, None)
+            .await
+            .unwrap();
+        assert!(approve_proposal(prop.id.clone()).unwrap());
         let handle = tokio::spawn(run_tracked(
             "sleep 30".into(),
             None,
             60,
             "t2".into(),
-            Some("approved".into()),
             None,
+            Some(prop.id),
         ));
 
         // Wait until the child is registered, then kill it.
@@ -396,13 +425,18 @@ mod tests {
         // The old code returned the timeout error while `sleep 30` kept
         // running. The executor must kill the group before reporting.
         let start = Instant::now();
+        use crate::proposal::{approve_proposal, create_shell_proposal};
+        let prop = create_shell_proposal("sleep 30".into(), None, None)
+            .await
+            .unwrap();
+        assert!(approve_proposal(prop.id.clone()).unwrap());
         let res = run_tracked(
             "sleep 30".into(),
             None,
             1,
             "t4".into(),
-            Some("approved".into()),
             None,
+            Some(prop.id),
         )
         .await;
         let elapsed = start.elapsed();
@@ -472,5 +506,53 @@ mod tests {
         .await;
         assert!(res2.is_err());
         assert!(res2.unwrap_err().contains("Blocked: proposal token is not in Approved status"));
+    }
+
+    #[tokio::test]
+    async fn approved_string_without_proposal_is_rejected() {
+        // A renderer-supplied "approved" string is not consent: approval-
+        // required mutations need a single-use native proposal token.
+        let res = run_tracked(
+            "touch /tmp/anybot-never".into(),
+            None,
+            10,
+            "t9".into(),
+            Some("approved".into()),
+            None,
+        )
+        .await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Blocked by policy"));
+    }
+
+    #[tokio::test]
+    async fn denied_pattern_is_blocked_even_when_marked_approved() {
+        let res = run_tracked(
+            "shutdown now".into(),
+            None,
+            10,
+            "t10".into(),
+            Some("approved".into()),
+            None,
+        )
+        .await;
+        assert!(res.is_err(), "deny rules must be unconditional");
+        assert!(res.unwrap_err().contains("deny rules cannot be overridden"));
+    }
+
+    #[tokio::test]
+    async fn protected_config_read_via_shell_is_blocked() {
+        let protected = crate::policy::config_dir().join("config.json");
+        let res = run_tracked(
+            format!("cat {}", protected.display()),
+            None,
+            10,
+            "t11".into(),
+            None,
+            None,
+        )
+        .await;
+        assert!(res.is_err(), "governance files must stay unreadable via shell");
+        assert!(res.unwrap_err().contains("PROTECTED"));
     }
 }

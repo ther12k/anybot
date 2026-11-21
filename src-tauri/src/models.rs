@@ -14,6 +14,9 @@ pub enum CommandSafetyTier {
     Safe,
     Mutative,
     Dangerous,
+    /// Unconditionally blocked: no approval path, proposal token, or
+    /// standing grant may execute the action.
+    Denied,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

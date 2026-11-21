@@ -25,7 +25,7 @@ export interface DetectedAgentCli {
   protocol: string;
 }
 
-export type CommandSafetyTier = "Safe" | "Mutative" | "Dangerous";
+export type CommandSafetyTier = "Safe" | "Mutative" | "Dangerous" | "Denied";
 
 export interface CommandSafetyResult {
   command: string;
