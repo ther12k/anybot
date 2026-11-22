@@ -1,12 +1,16 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use crate::audit::{record_audit, record_audit_at};
 use crate::models::{DirEntryInfo, FileReadResult, FileWriteResult, SystemInfo};
-use crate::policy::{audit, config_dir};
+use crate::policy::{audit_path, config_dir};
 use crate::proposal::consume_write_proposal;
 
-fn audit_fs(tool: &str, outcome: &str, path: &str, decision: &str, error: Option<&str>) {
-    audit(serde_json::json!({
+#[cfg(test)]
+#[path = "fs_tests.rs"]
+mod tests;
+
+fn audit_fs(log: &Path, tool: &str, outcome: &str, path: &str, decision: &str, error: Option<&str>) {
+    let _ = record_audit_at(log, serde_json::json!({
         "tool": tool,
         "decision": decision,
         "outcome": outcome,
@@ -45,23 +49,21 @@ pub fn command_touches_protected_path(command: &str) -> Option<String> {
 /// read would otherwise exfiltrate stored credentials, and a write could
 /// rewrite the permission boundary itself.
 pub fn is_protected_path(path: &str) -> bool {
+    is_protected_file(Path::new(path))
+}
+
+pub(crate) fn is_protected_file(path: &Path) -> bool {
     let protected = ["config.json", "policy.json", "standing-grants.json", "audit.jsonl"];
-    let resolved = match std::fs::canonicalize(path) {
-        Ok(p) => p,
-        Err(_) => PathBuf::from(path),
+    let cfg = config_dir();
+    let resolved_cfg = std::fs::canonicalize(&cfg).ok();
+    let is_config_file = |candidate: &Path| {
+        let (Some(parent), Some(name)) = (candidate.parent(), candidate.file_name()) else {
+            return false;
+        };
+        (parent == cfg || Some(parent) == resolved_cfg.as_deref()) &&
+            protected.iter().any(|p| name.eq_ignore_ascii_case(p))
     };
-    if let Some(parent) = resolved.parent() {
-        let parent_str = parent.to_string_lossy();
-        let cfg = config_dir();
-        let is_config_parent = parent_str == cfg.to_string_lossy()
-            || std::fs::canonicalize(&cfg).map(|c| c == parent).unwrap_or(false);
-        if is_config_parent {
-            if let Some(name) = resolved.file_name() {
-                return protected.iter().any(|p| name.eq_ignore_ascii_case(p));
-            }
-        }
-    }
-    false
+    is_config_file(path) || std::fs::canonicalize(path).is_ok_and(|resolved| is_config_file(&resolved))
 }
 
 #[tauri::command]
@@ -69,15 +71,23 @@ pub async fn read_file_content(
     path: String,
     max_lines: Option<usize>,
 ) -> Result<FileReadResult, String> {
-    if is_protected_path(&path) {
+    read_file_with_audit(&path, max_lines, &audit_path()).await
+}
+
+async fn read_file_with_audit(
+    path: &str,
+    max_lines: Option<usize>,
+    log: &Path,
+) -> Result<FileReadResult, String> {
+    if is_protected_path(path) {
         let msg = "PROTECTED: this file is part of AnyBot's own configuration and cannot be read by tools.".to_string();
-        audit_fs("read_file", "blocked", &path, "auto_safe", Some(&msg));
+        audit_fs(log, "read_file", "blocked", path, "auto_safe", Some(&msg));
         return Err(msg);
     }
-    let result = read_file_inner(&path, max_lines).await;
+    let result = read_file_inner(path, max_lines).await;
     match &result {
-        Ok(_) => audit_fs("read_file", "completed", &path, "auto_safe", None),
-        Err(e) => audit_fs("read_file", "failed", &path, "auto_safe", Some(e)),
+        Ok(_) => audit_fs(log, "read_file", "completed", path, "auto_safe", None),
+        Err(e) => audit_fs(log, "read_file", "failed", path, "auto_safe", Some(e)),
     }
     result
 }
@@ -85,9 +95,6 @@ pub async fn read_file_content(
 async fn read_file_inner(path: &str, max_lines: Option<usize>) -> Result<FileReadResult, String> {
     let p = Path::new(path);
     if !p.exists() {
-        // Machine-readable marker: only this exact condition may enter the
-        // "new file" proposal path. Binary/permission/IO errors are plain
-        // strings and must NEVER be treated as "file did not exist".
         return Err(format!("NOT_FOUND: {path}"));
     }
 
@@ -122,96 +129,62 @@ pub async fn write_file_content(
     decision: Option<String>,
     proposal_id: Option<String>,
 ) -> Result<FileWriteResult, String> {
-    // Trust boundary: every write requires a single-use native proposal
-    // bound to this exact path and content. A renderer-supplied "approved"
-    // string is not proof of human consent and is not accepted.
-    let Some(prop_id) = &proposal_id else {
-        audit_fs(
-            "write_file",
-            "blocked",
-            &path,
-            decision.as_deref().unwrap_or("none"),
-            Some("write without an approved proposal token"),
-        );
-        return Err(
-            "Blocked by policy: file writes require an approved single-use proposal token."
-                .to_string(),
-        );
-    };
-    consume_write_proposal(prop_id, &path, &content).map_err(|e| {
-        audit_fs(
-            "write_file",
-            "blocked",
-            &path,
-            "proposal_invalid",
-            Some(&e),
-        );
-        e
-    })?;
-
-    if is_protected_path(&path) {
-        let msg = "PROTECTED: this file is part of AnyBot's own configuration and cannot be modified by tools.".to_string();
-        audit_fs("write_file", "blocked", &path, "blocked", Some(&msg));
-        return Err(msg);
-    }
-
-    let result = write_file_inner(&path, &content).await;
-    match &result {
-        Ok(r) => audit(serde_json::json!({
-            "tool": "write_file",
-            "decision": "approved",
-            "proposal_id": proposal_id,
-            "outcome": "completed",
-            "path": r.path,
-            "size_bytes": r.size_bytes,
-        })),
-        Err(e) => audit_fs("write_file", "failed", &path, "approved", Some(e)),
-    }
-    result
+    write_file_with_audit(&path, &content, decision.as_deref(), proposal_id.as_deref(), &audit_path()).await
 }
 
-async fn write_file_inner(path: &str, content: &str) -> Result<FileWriteResult, String> {
-    let p = Path::new(path);
+async fn write_file_with_audit(
+    path: &str,
+    content: &str,
+    _decision: Option<&str>,
+    proposal_id: Option<&str>,
+    log: &Path,
+) -> Result<FileWriteResult, String> {
+    // Only a single-use native proposal authorizes an exact write. The
+    // renderer's decision string is neither authorization nor audit proof.
+    let Some(id) = proposal_id else {
+        let error = "Blocked by policy: file writes require an approved single-use proposal token.";
+        audit_fs(log, "write_file", "blocked", path, "none", Some(error));
+        return Err(error.into());
+    };
+    let reviewed = consume_write_proposal(id, path, content).inspect_err(|e| {
+        let _ = record_audit_at(log, serde_json::json!({
+            "tool": "write_file", "decision": "proposal_invalid", "proposal_id": id,
+            "outcome": "blocked", "path": path, "error": e,
+        }));
+    })?;
 
-    // Create parent directories if missing
-    if let Some(parent) = p.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
-        }
-    }
-
-    // Atomic write: write to temp file then rename
-    let tmp_path = format!("{path}.tmp.{}", std::process::id());
-    let file_result: Result<(), String> = async {
-        let mut file = fs::File::create(&tmp_path).await.map_err(|e| e.to_string())?;
-        file.write_all(content.as_bytes()).await.map_err(|e| e.to_string())?;
-        file.sync_all().await.map_err(|e| e.to_string())?;
-        drop(file);
-        fs::rename(&tmp_path, p).await.map_err(|e| e.to_string())
-    }
-    .await;
-
-    file_result?;
-
-    Ok(FileWriteResult {
-        path: path.to_string(),
-        success: true,
-        size_bytes: content.len(),
-    })
+    let actual_path = reviewed.path().display().to_string();
+    let requested = path.to_owned();
+    let content = content.to_owned();
+    let size_bytes = content.len();
+    let result = tokio::task::spawn_blocking(move || reviewed.apply(Path::new(&requested), &content))
+        .await.map_err(|e| format!("Reviewed write worker failed: {e}")).and_then(|result| result);
+    let _ = record_audit_at(log, serde_json::json!({
+        "tool": "write_file",
+        "decision": "approved",
+        "proposal_id": id,
+        "outcome": if result.is_ok() { "completed" } else { "failed" },
+        "path": actual_path,
+        "size_bytes": result.is_ok().then_some(size_bytes),
+        "error": result.as_ref().err(),
+    }));
+    result.map(|()| FileWriteResult { path: actual_path, success: true, size_bytes })
 }
 
 #[tauri::command]
 pub async fn list_dir_entries(path: String) -> Result<Vec<DirEntryInfo>, String> {
     let result = list_dir_inner(&path).await;
     match &result {
-        Ok(entries) => audit(serde_json::json!({
-            "tool": "list_directory",
-            "decision": "auto_safe",
-            "outcome": "completed",
-            "path": path,
-            "entry_count": entries.len(),
-        })),
-        Err(e) => audit_fs("list_directory", "failed", &path, "auto_safe", Some(e)),
+        Ok(entries) => {
+            let _ = record_audit(serde_json::json!({
+                "tool": "list_directory",
+                "decision": "auto_safe",
+                "outcome": "completed",
+                "path": path,
+                "entry_count": entries.len(),
+            }));
+        }
+        Err(e) => audit_fs(&audit_path(), "list_directory", "failed", &path, "auto_safe", Some(e)),
     }
     result
 }

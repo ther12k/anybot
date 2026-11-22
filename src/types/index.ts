@@ -45,11 +45,14 @@ export interface ToolCallItem {
   safetyReason?: string;
   /** Immutable native proposal token issued by the Rust backend. */
   proposalId?: string;
+  /** Failed attempts resolved by this successful retry. */
+  recoveredToolCallIds?: string[];
   result?: {
     output?: string;
     error?: string;
     /** Pre-write proposal: prepared BEFORE approval, not after the write. */
     diff?: { before: string; after: string; path: string; existed?: boolean };
+    exitCode?: number;
     executionTimeMs?: number;
   };
 }
@@ -79,14 +82,16 @@ export interface BotPromptSuggestion {
   toolsRequired?: boolean;
 }
 
-/** A repeatable multi-step task chain, run step-by-step with one click. */
+export type WorkflowGate = { kind: "human_input" } | { kind: "approval" };
+export type WorkflowStep = string | WorkflowGate;
+
+/** A repeatable task chain of agent prompts and human checkpoints. */
 export interface BotWorkflow {
   id: string;
   name: string;
   description: string;
   icon: string;
-  /** Ordered prompts; each step waits for the previous run to settle. */
-  steps: string[];
+  steps: WorkflowStep[];
   /** True when any step needs shell/file tools. */
   toolsRequired?: boolean;
   category?: Exclude<BotCategory, "all">;
@@ -123,6 +128,8 @@ export interface Thread {
   /** Room members (personas). `botId` remains the room's PRIMARY bot —
    *  the default addressee for messages without an @mention. */
   participantBotIds?: string[];
+  /** Resume point for a workflow waiting on a human event in this thread. */
+  pendingWorkflow?: { workflowId: string; nextStep: number; kind?: WorkflowGate["kind"] };
 }
 
 export interface VaultConfig {

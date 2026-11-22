@@ -2,9 +2,8 @@ import { BotWorkflow } from "../types";
 
 /**
  * Seeded one-click workflows (Grok Bot-style multi-step task chains).
- * Each step is a full agent turn — tools, approvals, and diffs behave
- * exactly like a hand-typed conversation. `toolsRequired` gates the card
- * on chat-only models instead of promising what can't run.
+ * Agent prompts use the normal review flow; human checkpoints pause before
+ * the next prompt. Workflows that need tools require an AnyBot tool adapter.
  */
 export const DEFAULT_WORKFLOWS: BotWorkflow[] = [
   {
@@ -53,6 +52,7 @@ export const DEFAULT_WORKFLOWS: BotWorkflow[] = [
     category: "productivity",
     steps: [
       "Act as my chief of staff. Interview me in one short message about what's on my plate today.",
+      { kind: "human_input" },
       "Turn my answers into a prioritized plan: top 3 goals, one focus block, and what to defer.",
       "Draft a 3-bullet status update I can send to stakeholders, based on the plan.",
     ],
@@ -66,7 +66,8 @@ export const DEFAULT_WORKFLOWS: BotWorkflow[] = [
     category: "writing",
     steps: [
       "Read the README.md in this workspace and summarize its current structure in 5 bullets.",
-      "Propose a concrete rewrite plan: what to cut, what to add, what to fix. Wait for my confirmation on the direction.",
+      "Propose a concrete rewrite plan: what to cut, what to add, what to fix. Do not edit files in this step.",
+      { kind: "approval" },
       "Write the improved README as a file change proposal so I can review the diff before anything is applied.",
     ],
   },

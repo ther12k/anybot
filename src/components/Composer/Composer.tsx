@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { ArrowUp, AtSign, ChevronDown, LockKeyhole, Plus, ShieldCheck, Sparkles, Square, Wrench } from "lucide-react";
 import { AIModel, BotPersona } from "../../types";
-import { AVAILABLE_MODELS } from "../../services/ai/models";
+import { AVAILABLE_MODELS, isCliModel } from "../../services/ai/models";
 import "./composer.css";
 
 interface ComposerProps {
@@ -19,8 +19,8 @@ interface ComposerProps {
 }
 
 const modelGroups = [
-  { label: "Local CLI / ACP", models: AVAILABLE_MODELS.filter((model) => model.isByop) },
-  { label: "Provider APIs & local models", models: AVAILABLE_MODELS.filter((model) => !model.isByop) },
+  { label: "Local CLI / ACP", models: AVAILABLE_MODELS.filter(isCliModel) },
+  { label: "Provider APIs & local models", models: AVAILABLE_MODELS.filter((model) => !isCliModel(model)) },
 ];
 const mentionPattern = /(?:^|[^\w@-])@([\w-]*)$/;
 
@@ -161,7 +161,8 @@ export const Composer: React.FC<ComposerProps> = ({
 
   const messageLabel = mentionCandidates ? "Message the room" : botName ? `Message ${botName}` : "Message your agent";
   const statusText = isStopping ? "Stopping… waiting for the run to settle" : isAwaitingApproval ? "Waiting for your review" : "Working on your request…";
-  const toolsLabel = selectedModel.isByop ? "Tools: CLI-managed" : selectedModel.supportsTools ? "Tools: Available" : "Tools: Off";
+  const cli = isCliModel(selectedModel);
+  const toolsLabel = cli ? "Tools: CLI-managed" : selectedModel.supportsTools ? "Tools: Available" : "Tools: Off";
 
   return (
     <div className="composer-wrap">
@@ -280,7 +281,7 @@ export const Composer: React.FC<ComposerProps> = ({
                       >
                         <div className="grow min-w-0 break-words">
                           <strong>{model.name}</strong>
-                          <small>{model.isByop ? "Local CLI" : `${model.provider} · ${model.supportsTools ? "Tools supported" : "Chat only"}`}</small>
+                          <small>{isCliModel(model) ? "Local CLI" : `${model.provider} · ${model.supportsTools ? "Tools supported" : "Chat only"}`}</small>
                         </div>
                       </button>
                     ))}
@@ -302,7 +303,7 @@ export const Composer: React.FC<ComposerProps> = ({
       </form>
       <p className="composer-disclaimer" id={guidanceId}>
         <ShieldCheck className="icon" aria-hidden="true" />
-        {selectedModel.isByop ? "Local tools follow the selected CLI’s permissions." : "Enter to send · Shift+Enter for a new line"}
+        {cli ? "Local tools follow the selected CLI’s permissions." : "Enter to send · Shift+Enter for a new line"}
       </p>
     </div>
   );

@@ -6,10 +6,17 @@ import {
 } from "lucide-react";
 import { AnyBotCharacter, type TaviMood } from "../Tavi/AnyBotCharacter";
 import type { AIModel, BotPersona, Thread, ToolCallItem, TranscriptEntry } from "../../types";
+import { isCliModel } from "../../services/ai/models";
+import type { WorkflowState } from "../../services/workflow";
 
 export type WorkspaceView = "chats" | "rooms" | "workflows" | "agents" | "files" | "audit" | "settings";
 export type RunStatus = { label: string; mood: TaviMood };
-export type WorkflowProgress = { name: string; step: number; total: number; finished?: boolean };
+export type WorkflowProgress = { name: string; step: number; total: number; state: WorkflowState };
+
+const workflowStates: Record<WorkflowState, string> = {
+  running: "Running", awaiting_input: "Waiting for your input", awaiting_approval: "Waiting for plan approval",
+  completed: "Completed", cancelled: "Stopped", failed: "Stopped after a failure",
+};
 
 const sections = [
   ["chats", "Chats", MessageSquare], ["rooms", "Team Rooms", Users],
@@ -101,7 +108,7 @@ export function ChatRail({ rooms, threads, entries, bots, active, busy, mobile, 
           return <button key={thread.id} type="button" className={`thread-item ${active === thread.id ? "active" : ""}`} title={title}
             aria-current={active === thread.id ? "true" : undefined} disabled={busy && active !== thread.id} onClick={() => onSelect(thread.id)}>
             <Icon className="icon" aria-hidden="true" /><span className="grow"><span className="thread-title">{title}</span>
-              <span className="thread-meta">{awaiting(thread.id) ? "Waiting for approval" : rooms ? `${thread.participantBotIds?.length ?? 0} agents` : bots.find((b) => b.id === thread.botId)?.name || "Agent"}</span>
+              <span className="thread-meta">{awaiting(thread.id) ? "Waiting for approval" : thread.pendingWorkflow ? "Workflow paused" : rooms ? `${thread.participantBotIds?.length ?? 0} agents` : bots.find((b) => b.id === thread.botId)?.name || "Agent"}</span>
             </span>
           </button>;
         })}
@@ -126,6 +133,7 @@ export function Inspector({ overlay, status, thread, bot, model, entries, worksp
   safeTools: boolean; onAudit: () => void; onSettings: () => void; onClose: () => void;
 }) {
   const [tab, setTab] = useState<"Run" | "Thread" | "Workflow">("Run");
+  const cli = isCliModel(model);
   let lastPrompt = entries.length - 1;
   while (lastPrompt >= 0 && entries[lastPrompt].role !== "user") lastPrompt--;
   const tools = entries.slice(lastPrompt + 1).flatMap((entry) => entry.toolCalls ?? []);
@@ -137,23 +145,29 @@ export function Inspector({ overlay, status, thread, bot, model, entries, worksp
     {tab === "Run" && <>
       <section className="inspector-card">
         <div className="run-status" role="status">{busy && status.mood !== "approval" ? <span className="spinner large" aria-hidden="true" /> : <span aria-hidden="true" className={`status-dot ${status.mood === "success" ? "green" : status.mood === "error" ? "red" : ""}`}>{status.mood === "success" ? "✓" : status.mood === "error" ? "!" : "·"}</span>}<strong>{status.label}</strong></div>
-        <div className="run-sub">{thread ? "Latest turn in this conversation" : "No active conversation"}</div>
-        <div className="run-visual"><p>{status.mood === "approval" ? "Review the proposed action in the conversation before it can run." : busy ? "You can stop the run from the composer." : "Tool activity appears below as it happens."}</p><AnyBotCharacter size={83} mood={status.mood} className="mascot" /></div>
+        <div className="run-sub">{thread ? "This conversation" : "No active conversation"}</div>
+        <div className="run-visual"><p>{workflow?.state === "awaiting_approval" ? "Review the plan in the conversation before continuing."
+          : workflow?.state === "awaiting_input" ? "Your reply starts the next workflow step."
+            : status.mood === "approval" ? "Review the proposed action in the conversation before it can run."
+              : busy ? "You can stop the run from the composer." : "AnyBot tool activity appears below as it happens."}</p><AnyBotCharacter size={83} mood={status.mood} className="mascot" /></div>
         {!!tools.length && <div className="step-list">{tools.map((tool) => <div key={tool.id} className={`step ${tool.status === "completed" ? "done" : tool.status === "pending_approval" ? "current" : tool.status === "running" ? "running" : "failed"}`}><span className="step-icon" aria-hidden="true">{tool.status === "completed" ? "✓" : ""}</span><span className="grow">{tool.name}</span><span className={`tag ${toolStates[tool.status][1]}`}>{toolStates[tool.status][0]}</span></div>)}</div>}
       </section>
       <section className="inspector-card"><h3><Layers3 className="icon" aria-hidden="true" />Context</h3><div className="context-table">
         <ContextRow label="Workspace"><Folder className="icon" aria-hidden="true" />{workspace}</ContextRow>
         <ContextRow label={thread?.isRoom ? "Primary agent" : "Agent"}><Bot className="icon" aria-hidden="true" />{bot.name}</ContextRow>
         <ContextRow label="Model">{model.name}</ContextRow>
-        <ContextRow label="Tools"><Code2 className="icon" aria-hidden="true" />{model.provider === "acp" ? "CLI-managed" : model.supportsTools ? "Available" : "Chat only"}</ContextRow>
+        <ContextRow label="Tools"><Code2 className="icon" aria-hidden="true" />{cli ? "CLI-managed" : model.supportsTools ? "Available" : "Chat only"}</ContextRow>
       </div></section>
       <section className="inspector-card"><h3><ClipboardList className="icon" aria-hidden="true" />Audit<button className="text-link" type="button" onClick={onAudit} disabled={busy}>View all</button></h3><p className="small muted">Verify the protected audit log in the desktop app.</p></section>
-      <section className="inspector-card"><h3><Shield className="icon" aria-hidden="true" />Permissions</h3><div className="policy-row">Safe tools<span className="tag neutral">{safeTools ? "Auto-approve" : "Ask first"}</span></div><div className="policy-row">File writes<span className="tag amber">Review required</span></div><div className="policy-row"><button className="text-link" type="button" onClick={onSettings} disabled={busy}>Open settings</button></div></section>
+      <section className="inspector-card"><h3><Shield className="icon" aria-hidden="true" />Permissions</h3>{cli
+        ? <p className="small muted">The selected CLI manages its own tools. AnyBot’s tool approvals do not govern CLI actions.</p>
+        : <><div className="policy-row">Safe tools<span className="tag neutral">{safeTools ? "Auto-approve" : "Ask first"}</span></div><div className="policy-row">File writes<span className="tag amber">Review required</span></div></>}
+        <div className="policy-row"><button className="text-link" type="button" onClick={onSettings} disabled={busy}>Open settings</button></div></section>
     </>}
     {tab === "Thread" && <section className="inspector-card"><h3><MessageSquare className="icon" aria-hidden="true" />About this {thread?.isRoom ? "room" : "thread"}</h3><p className="small muted">{thread?.title || "New conversation"}</p><div className="context-table">
       <ContextRow label="Messages">{entries.length}</ContextRow><ContextRow label="Workspace">{workspace}</ContextRow><ContextRow label="Agent">{bot.name}</ContextRow>{thread && <ContextRow label="Created">{new Date(thread.createdAt).toLocaleString()}</ContextRow>}
     </div></section>}
-    {tab === "Workflow" && <section className="inspector-card"><h3><Workflow className="icon" aria-hidden="true" />Workflow</h3><p className="small muted">{workflow ? `${workflow.name} · Step ${workflow.step} of ${workflow.total}${workflow.finished ? " · Ended" : ""}` : "No workflow recorded for this conversation in this session."}</p></section>}
+    {tab === "Workflow" && <section className="inspector-card"><h3><Workflow className="icon" aria-hidden="true" />Workflow</h3><p className="small muted">{workflow ? `${workflow.name} · Step ${workflow.step} of ${workflow.total} · ${workflowStates[workflow.state]}` : "No workflow recorded for this conversation in this session."}</p></section>}
   </aside>;
 }
 
@@ -175,11 +189,19 @@ export function WorkspaceDialog({ title, description, onClose, children }: { tit
   </dialog>;
 }
 
-export function WorkspaceTitlebar({ workspace, browserPreview, onHelp }: { workspace: string; browserPreview: boolean; onHelp: () => void }) {
+export function WorkspaceTitlebar({ workspace, browserPreview, auditRecordingFailed, auditUnavailable, onAudit, onHelp }: {
+  workspace: string; browserPreview: boolean; auditRecordingFailed: boolean; auditUnavailable: boolean;
+  onAudit: () => void; onHelp: () => void;
+}) {
   return <div className="titlebar">
-    <div className="titlebar-caption"><span>AnyBot</span><span aria-hidden="true"> / </span><span>{workspace}</span>
+    <div className="titlebar-caption"><span>AnyBot</span><span aria-hidden="true"> / </span><span className="truncate" title={workspace}>{workspace}</span>
       {browserPreview && <span className="demo-pill" title="Native tools are simulated in the browser"><i aria-hidden="true" />Browser preview</span>}
     </div>
-    <div className="titlebar-actions"><Action icon={CircleHelp} label="Keyboard shortcuts" onClick={onHelp} /></div>
+    <span className="sr-only" role="status">{auditRecordingFailed ? "Audit recording failed. Some activity may be missing." : ""}</span>
+    <div className="titlebar-actions">
+      {auditRecordingFailed && <button type="button" className="tag amber audit-warning-button"
+        aria-label="Audit recording failed. Open Audit log" onClick={onAudit} disabled={auditUnavailable}>Audit recording failed</button>}
+      <Action icon={CircleHelp} label="Keyboard shortcuts" onClick={onHelp} />
+    </div>
   </div>;
 }

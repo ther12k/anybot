@@ -42,6 +42,9 @@ function ToolResult({ toolCall }: { toolCall: ToolCallItem }) {
   const { result, status } = toolCall;
   return (
     <>
+      {Boolean(toolCall.recoveredToolCallIds?.length) && (
+        <p className="small muted">Retry succeeded. Earlier failed attempts are kept above.</p>
+      )}
       {result?.error && status !== "pending_approval" && (
         <div className="state-notice error break-words">
           <CircleX className="icon shrink-0" aria-hidden="true" />

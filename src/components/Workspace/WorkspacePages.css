@@ -101,6 +101,48 @@
   list-style: none;
 }
 
+.warm-workspace .workspace-secondary .audit-result {
+  align-items: flex-start;
+}
+
+.warm-workspace .audit-result h2,
+.warm-workspace .workspace-audit-activity h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.warm-workspace .workspace-secondary .audit-result p {
+  font-size: 12px;
+}
+
+.warm-workspace .workspace-secondary .audit-result.neutral {
+  background: var(--panel);
+  border-color: var(--line);
+}
+
+.warm-workspace .workspace-secondary .audit-result.recording-warning {
+  background: var(--amber-bg);
+  border-color: #f7e7c9;
+}
+
+.warm-workspace .workspace-audit-activity {
+  margin-top: 22px;
+}
+
+.warm-workspace .workspace-audit-activity > p {
+  margin: 4px 0 12px;
+}
+
+.warm-workspace .workspace-secondary .audit-table {
+  font-variant-numeric: tabular-nums;
+}
+
+.warm-workspace .workspace-audit-activity .table-wrap:focus-visible {
+  outline: 3px solid #b5a0cd;
+  outline-offset: 3px;
+}
+
 @media (max-width: 640px) {
   .warm-workspace .workspace-secondary .page-header > .grow {
     flex-basis: 100%;

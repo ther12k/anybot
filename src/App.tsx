@@ -8,10 +8,11 @@ import { NewRoomModal } from "./components/NewRoomModal/NewRoomModal";
 import { AnyBotCharacter, type TaviMood } from "./components/Tavi/AnyBotCharacter";
 import { DEFAULT_BOTS } from "./data/defaultBots";
 import { DEFAULT_WORKFLOWS } from "./data/defaultWorkflows";
-import { AVAILABLE_MODELS } from "./services/ai/models";
+import { AVAILABLE_MODELS, isCliModel } from "./services/ai/models";
 import { AgentLoop, type RunOutcome, type DelegateResult } from "./services/agent/agentLoop";
 import { streamChatCompletion } from "./services/ai/streamClient";
-import { TauriBridge, isTauriEnvironment } from "./services/tauri/bridge";
+import { TauriBridge, isTauriEnvironment, observeAuditRecordingFailure } from "./services/tauri/bridge";
+import { getWorkflowPause, isWorkflowGate, modelCanRunWorkflow, reconcileWorkflows, runWorkflowSteps } from "./services/workflow";
 import {
   BotPersona,
   Thread,
@@ -49,7 +50,13 @@ const isTranscriptMap = (v: any) => {
 };
 const isWorkflowList = (v: any) =>
   Array.isArray(v) &&
-  v.every((w) => w && typeof w.id === "string" && typeof w.name === "string" && Array.isArray(w.steps));
+  v.every((w) => w && typeof w.id === "string" && typeof w.name === "string" &&
+    Array.isArray(w.steps) &&
+    w.steps.every((s: unknown) => typeof s === "string" || isWorkflowGate(s)));
+
+function userEntry(threadId: string, content: string): TranscriptEntry {
+  return { id: `user_${crypto.randomUUID()}`, threadId, role: "user", content, timestamp: Date.now() };
+}
 
 export const App: React.FC = () => {
   // State — v4: capability-flagged starter prompts; custom bots survive
@@ -87,12 +94,14 @@ export const App: React.FC = () => {
   );
 
   // One-click multi-step workflows (Grok Bot-style task chains)
-  const [workflows] = useState<BotWorkflow[]>(() =>
-    loadStored<BotWorkflow[]>("anybot_workflows_v1", isWorkflowList, DEFAULT_WORKFLOWS)
+  const [workflows] = useState(() =>
+    reconcileWorkflows(loadStored("anybot_workflows_v1", isWorkflowList, DEFAULT_WORKFLOWS))
   );
-  const [workflowProgress, setWorkflowProgress] = useState<WorkflowProgress | null>(null);
+  const [workflowProgress, setWorkflowProgress] = useState<(WorkflowProgress & { threadId: string }) | null>(null);
   const [workflowHistory, setWorkflowHistory] = useState<Record<string, WorkflowProgress>>({});
-  const stopWorkflowRef = useRef(false);
+  const [workflowSaveError, setWorkflowSaveError] = useState<{ threadId: string; message: string } | null>(null);
+  const workflowRunningRef = useRef(false);
+  const stopRunRef = useRef(false);
 
   const [vault, setVault] = useState<VaultConfig>({
     autoApproveSafeTools: true,
@@ -117,6 +126,8 @@ export const App: React.FC = () => {
   const [isStopping, setIsStopping] = useState(false);
   const [editingBot, setEditingBot] = useState<BotPersona | null>(null);
   const [view, setView] = useState<WorkspaceView>("chats");
+  const [auditRecordingFailed, setAuditRecordingFailed] = useState(false);
+  useEffect(() => observeAuditRecordingFailure(() => setAuditRecordingFailed(true)), []);
   const [dialog, setDialog] = useState<"help" | "agent" | "model" | "thread" | null>(null);
   const [workflowModel, setWorkflowModel] = useState<AIModel | null>(null);
   const [inspectorHidden, setInspectorHidden] = useState(false);
@@ -163,10 +174,41 @@ export const App: React.FC = () => {
     setTranscripts(next);
   };
   const threadsRef = useRef(threads);
-  threadsRef.current = threads;
+  const updateThreads = (update: (list: Thread[]) => Thread[]) => {
+    const next = update(threadsRef.current);
+    threadsRef.current = next;
+    setThreads(next);
+  };
+
+  const saveWorkflowCheckpoint = (id: string, pendingWorkflow: Thread["pendingWorkflow"], decision?: string) => {
+    const nextThreads = threadsRef.current.map((t) => t.id === id ? { ...t, pendingWorkflow } : t);
+    const entries = transcriptsRef.current[id] ?? [];
+    const nextTranscripts = decision
+      ? { ...transcriptsRef.current, [id]: [...entries, userEntry(id, decision)] }
+      : transcriptsRef.current;
+    try {
+      // Keep the evidence and consume the checkpoint before dispatching the
+      // next step. A reload must not leave a live, already-used decision.
+      if (pendingWorkflow || decision) localStorage.setItem("anybot_transcripts", JSON.stringify(nextTranscripts));
+      localStorage.setItem("anybot_threads", JSON.stringify(nextThreads));
+    } catch (error) {
+      console.error("Failed to save workflow checkpoint:", error);
+      setWorkflowSaveError({ threadId: id, message: "Couldn’t save the workflow checkpoint. No further steps were sent." });
+      return false;
+    }
+    updateThreads(() => nextThreads);
+    if (decision) {
+      transcriptsRef.current = nextTranscripts;
+      setTranscripts(nextTranscripts);
+    }
+    setWorkflowSaveError(null);
+    return true;
+  };
+
   /** Persona running the CURRENT turn (Team Rooms): delegation audit
    *  provenance names the actual speaker, not the sidebar selection. */
   const currentRunBotIdRef = useRef<string | null>(null);
+  const currentRunModelRef = useRef<AIModel | null>(null);
   const [isRoomModalOpen, setIsRoomModalOpen] = useState(false);
 
   useEffect(() => {
@@ -210,7 +252,11 @@ export const App: React.FC = () => {
   }, [workflows]);
 
   useEffect(() => {
-    localStorage.setItem("anybot_threads", JSON.stringify(threads));
+    try {
+      localStorage.setItem("anybot_threads", JSON.stringify(threadsRef.current));
+    } catch (error) {
+      console.error("Failed to persist conversations:", error);
+    }
   }, [threads]);
 
   // Streaming writes a lot: debounce so each token doesn't serialize the
@@ -218,7 +264,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     const t = window.setTimeout(() => {
       try {
-        localStorage.setItem("anybot_transcripts", JSON.stringify(transcripts));
+        localStorage.setItem("anybot_transcripts", JSON.stringify(transcriptsRef.current));
       } catch (e) {
         console.error("Failed to persist transcript:", e);
       }
@@ -306,15 +352,32 @@ export const App: React.FC = () => {
           .filter(Boolean) as BotPersona[])
       : [];
 
-  const busy = isGenerating || !!workflowProgress;
+  const resumableWorkflow = (thread: Thread | null) => {
+    const pause = getWorkflowPause(workflows, thread?.pendingWorkflow);
+    if (!thread || !pause || thread.isRoom || !bots.some((bot) => bot.id === thread.botId)) return null;
+    const model = AVAILABLE_MODELS.find(({ id }) => id === thread.modelId);
+    return model && modelCanRunWorkflow(pause.workflow, model) ? pause : null;
+  };
+  const pausedWorkflow = resumableWorkflow(activeThread);
+  const activeWorkflowRun = workflowProgress?.threadId === activeThreadId ? workflowProgress : undefined;
+  const threadWorkflow: WorkflowProgress | undefined = activeWorkflowRun ?? (pausedWorkflow ? {
+    name: pausedWorkflow.workflow.name,
+    step: pausedWorkflow.nextStep,
+    total: pausedWorkflow.workflow.steps.length,
+    state: pausedWorkflow.gate.kind === "approval" ? "awaiting_approval" : "awaiting_input",
+  } : activeThreadId ? workflowHistory[activeThreadId] : undefined);
+  const busy = isGenerating || workflowProgress !== null;
   const pending = currentTranscript.flatMap((e) => e.toolCalls ?? []).filter((tc) => tc.status === "pending_approval");
   const hasRunningTool = currentTranscript.some((e) => e.toolCalls?.some((tc) => tc.status === "running"));
   const lastOutcome = activeThreadId ? outcomes[activeThreadId] : undefined;
   const runStatus: RunStatus = (() => {
     if (isStopping) return { label: "Stopping…", mood: "working" };
     if (pending.length) return { label: "Waiting for your approval", mood: "approval" };
-    if (workflowProgress) return { label: `${workflowProgress.name} · Step ${workflowProgress.step}/${workflowProgress.total}`, mood: "working" };
+    if (activeWorkflowRun) return { label: `${activeWorkflowRun.name} · Step ${activeWorkflowRun.step}/${activeWorkflowRun.total}`, mood: "working" };
     if (isGenerating) return { label: "Working on your request", mood: hasRunningTool ? "working" : "thinking" };
+    if (pausedWorkflow?.gate.kind === "approval") return { label: "Waiting for plan approval", mood: "approval" };
+    if (pausedWorkflow) return { label: "Waiting for your input", mood: "listening" };
+    if (activeThread?.pendingWorkflow) return { label: "Workflow can’t resume", mood: "error" };
     if (lastOutcome === "completed") return { label: "Completed", mood: "success" };
     if (lastOutcome === "cancelled") return { label: "Stopped by you", mood: "idle" };
     if (lastOutcome === "failed") return { label: "Something needs attention", mood: "error" };
@@ -349,9 +412,7 @@ export const App: React.FC = () => {
       title, createdAt: now, updatedAt: now,
       ...(roomMembers ? { isRoom: true, participantBotIds: roomMembers } : {}),
     };
-    const next = [thread, ...threadsRef.current];
-    threadsRef.current = next;
-    setThreads(next);
+    updateThreads((prev) => [thread, ...prev]);
     setActiveThreadId(thread.id);
     setActiveBot(bot);
     setSelectedModel(model);
@@ -367,7 +428,7 @@ export const App: React.FC = () => {
   const handleDeleteThread = (threadId: string) => {
     if (busy) return;
     const thread = threads.find((t) => t.id === threadId);
-    setThreads(threads.filter((t) => t.id !== threadId));
+    updateThreads((prev) => prev.filter((t) => t.id !== threadId));
     const nextTranscripts = { ...transcripts };
     delete nextTranscripts[threadId];
     transcriptsRef.current = nextTranscripts;
@@ -388,15 +449,13 @@ export const App: React.FC = () => {
   const handleUndoDelete = () => {
     if (!deletedChat) return;
     window.clearTimeout(undoTimerRef.current);
-    setThreads((prev) => [deletedChat.thread, ...prev]);
+    updateThreads((prev) => [deletedChat.thread, ...prev]);
     updateTranscript(deletedChat.thread.id, () => deletedChat.entries);
     setDeletedChat(null);
   };
 
   const handleTogglePinThread = (threadId: string) => {
-    setThreads(
-      threads.map((t) => (t.id === threadId ? { ...t, isPinned: !t.isPinned } : t))
-    );
+    updateThreads((prev) => prev.map((t) => t.id === threadId ? { ...t, isPinned: !t.isPinned } : t));
   };
 
   /** Opening a task restores ITS agent and model — history keeps its identity. */
@@ -434,7 +493,7 @@ export const App: React.FC = () => {
       return;
     }
     setSelectedModel(model);
-    if (activeThreadId) setThreads((prev) => prev.map((t) => t.id === activeThreadId ? { ...t, modelId: model.id } : t));
+    if (activeThreadId) updateThreads((prev) => prev.map((t) => t.id === activeThreadId ? { ...t, modelId: model.id } : t));
   };
 
   const handleSelectBot = (bot: BotPersona) => {
@@ -444,7 +503,7 @@ export const App: React.FC = () => {
       forkThread(activeThread, bot, model);
     } else if (activeThread && !activeThread.isRoom) {
       if (activeThread.botId !== bot.id) {
-        setThreads((prev) => prev.map((t) => t.id === activeThread.id ? { ...t, botId: bot.id, modelId: model.id } : t));
+        updateThreads((prev) => prev.map((t) => t.id === activeThread.id ? { ...t, botId: bot.id, modelId: model.id } : t));
         setSelectedModel(model);
       }
       setActiveBot(bot);
@@ -506,15 +565,22 @@ export const App: React.FC = () => {
       return { ok: false, error: "Delegation task is empty." };
     }
 
-    const hasKey = (m: AIModel) =>
+    const canDelegateTo = (m: AIModel) => !isCliModel(m) && (
       m.provider === "ollama" ||
-      m.provider === "acp" ||
-      m.isByop === true ||
       (m.provider === "anthropic" && !!vault.anthropicApiKey?.trim()) ||
       (m.provider === "openai" && !!vault.openaiApiKey?.trim()) ||
-      (m.provider === "grok" && !!vault.grokApiKey?.trim());
-    const preferred = AVAILABLE_MODELS.find((m) => m.id === target.defaultModel && hasKey(m));
-    const model = preferred ?? selectedModel;
+      (m.provider === "grok" && !!vault.grokApiKey?.trim())
+    );
+    const preferred = AVAILABLE_MODELS.find((m) => m.id === target.defaultModel && canDelegateTo(m));
+    const fallback = currentRunModelRef.current ?? selectedModel;
+    const model = preferred ?? (canDelegateTo(fallback) ? fallback : null);
+    if (!model) {
+      return {
+        ok: false,
+        botName: target.name,
+        error: "Tool-less delegation requires a configured API model or an Ollama model. CLI agents manage their own tools.",
+      };
+    }
 
     const audit = (outcome: "completed" | "failed" | "cancelled", error?: string) =>
       TauriBridge.recordDelegationAudit(
@@ -590,28 +656,18 @@ export const App: React.FC = () => {
     setIsRoomModalOpen(false);
   };
 
-  const handleSendMessage = async (text: string, workflowThread?: Thread): Promise<RunOutcome | null> => {
-    if (agentLoopRef.current.isBusy() || (!workflowThread && busy)) return null;
-    if (!workflowThread) stopWorkflowRef.current = false;
+  const sendTurn = async (text: string, thread: Thread): Promise<RunOutcome | null> => {
+    if (agentLoopRef.current.isBusy()) return null;
     const title = text.slice(0, 45) + (text.length > 45 ? "…" : "");
-    const thread = workflowThread ?? activeThread ?? createThread(activeBot, selectedModel, title);
     const currentThreadId = thread.id;
     const threadModel = AVAILABLE_MODELS.find((model) => model.id === thread.modelId) ?? selectedModel;
     const threadBot = bots.find((b) => b.id === thread.botId) ?? activeBot;
     const threadHistory = transcriptsRef.current[currentThreadId] ?? [];
-    setThreads((prev) => prev.map((t) => t.id === currentThreadId ? {
+    updateThreads((prev) => prev.map((t) => t.id === currentThreadId ? {
       ...t, title: !t.isRoom && t.title === "New chat" && !threadHistory.length ? title : t.title, updatedAt: Date.now(),
     } : t));
 
-    const userEntry: TranscriptEntry = {
-      id: `user_${Date.now()}`,
-      threadId: currentThreadId,
-      role: "user",
-      content: text,
-      timestamp: Date.now(),
-    };
-
-    const historyWithPrompt = [...threadHistory, userEntry];
+    const historyWithPrompt = [...threadHistory, userEntry(currentThreadId, text)];
     updateTranscript(currentThreadId, () => historyWithPrompt);
     const responders = thread.isRoom ? resolveRoomResponders(text, thread) : [threadBot];
     const approvals = new Set<string>();
@@ -624,6 +680,7 @@ export const App: React.FC = () => {
       approvalResolversRef.current.set(toolCall.id, resolve);
     };
 
+    currentRunModelRef.current = threadModel;
     setIsGenerating(true);
     setIsStopping(false);
 
@@ -631,7 +688,7 @@ export const App: React.FC = () => {
       let finalOutcome: RunOutcome = "completed";
       for (let i = 0; i < responders.length; i++) {
         // Stop breaks the responder chain honestly (workflow pattern).
-        if (i > 0 && stopWorkflowRef.current) {
+        if (i > 0 && stopRunRef.current) {
           finalOutcome = "cancelled";
           break;
         }
@@ -683,51 +740,106 @@ export const App: React.FC = () => {
       return "failed";
     } finally {
       currentRunBotIdRef.current = null;
+      currentRunModelRef.current = null;
       approvals.forEach((id) => approvalResolversRef.current.delete(id));
-      // Settle before accepting new input: Stop keeps control until here.
       setIsGenerating(false);
-      setIsStopping(false);
+      if (!workflowRunningRef.current) setIsStopping(false);
     }
   };
 
   const handleStop = () => {
-    // A running workflow chain must not continue with its next step.
-    stopWorkflowRef.current = true;
-    if (agentLoopRef.current.abort() || workflowProgress) {
-      // The run stays busy until it settles; the composer flips back to Send
-      // only after the awaited runTurn resolves.
-      setIsStopping(true);
-    }
+    stopRunRef.current = true;
+    if (agentLoopRef.current.abort() || workflowRunningRef.current) setIsStopping(true);
   };
 
-  /**
-   * Run a one-click workflow: each step is a full agent turn that must
-   * settle before the next starts. Stop cancels the current step AND the
-   * remaining chain. Steps behave exactly like hand-typed messages — tools,
-   * approvals, and reviewed diffs all apply.
-   */
-  const handleRunWorkflow = async (wf: BotWorkflow) => {
-    if (agentLoopRef.current.isBusy() || workflowProgress) return;
-    const model = workflowModel ?? selectedModel;
-    if (wf.toolsRequired && !model.supportsTools) return;
-
-    stopWorkflowRef.current = false;
-    const thread = createThread(activeBot, model, wf.name);
-    let progress: WorkflowProgress = { name: wf.name, step: 0, total: wf.steps.length };
+  const runWorkflowChain = async (wf: BotWorkflow, thread: Thread, startIndex: number) => {
+    const { id: threadId } = thread;
+    workflowRunningRef.current = true;
+    stopRunRef.current = false;
+    let step = startIndex;
+    const progress = (state: WorkflowProgress["state"]): WorkflowProgress => ({
+      name: wf.name, step, total: wf.steps.length, state,
+    });
+    const finish = (state: RunOutcome) => {
+      setOutcomes((prev) => ({ ...prev, [threadId]: state }));
+      setWorkflowHistory((prev) => ({ ...prev, [threadId]: progress(state) }));
+    };
     try {
-      for (const [index, prompt] of wf.steps.entries()) {
-        if (stopWorkflowRef.current) break;
-        progress = { ...progress, step: index + 1 };
-        setWorkflowProgress(progress);
-        const outcome = await handleSendMessage(prompt, thread);
-        if (outcome !== "completed") break;
+      const result = await runWorkflowSteps(wf, startIndex, {
+        shouldStop: () => stopRunRef.current,
+        onStep: (nextStep) => {
+          step = nextStep;
+          setWorkflowProgress({ ...progress("running"), threadId });
+        },
+        runPrompt: (prompt) => sendTurn(prompt, thread),
+      });
+      step = result.step;
+      if ("gate" in result) {
+        if (!saveWorkflowCheckpoint(threadId, { workflowId: wf.id, nextStep: result.nextStep, kind: result.gate.kind })) {
+          finish("failed");
+        }
+        return;
       }
+      finish(result.state);
+    } catch (error) {
+      console.error("Workflow chain failed:", error);
+      finish(stopRunRef.current ? "cancelled" : "failed");
     } finally {
-      if (stopWorkflowRef.current) setOutcomes((prev) => ({ ...prev, [thread.id]: "cancelled" }));
-      setWorkflowHistory((prev) => ({ ...prev, [thread.id]: { ...progress, finished: true } }));
+      workflowRunningRef.current = false;
       setWorkflowProgress(null);
       setIsStopping(false);
     }
+  };
+
+  const cannotStartTurn = () => busy || workflowRunningRef.current || agentLoopRef.current.isBusy();
+
+  const handleRunWorkflow = (wf: BotWorkflow) => {
+    const model = workflowModel ?? selectedModel;
+    if (cannotStartTurn() || !modelCanRunWorkflow(wf, model)) return;
+    const thread = createThread(activeBot, model, wf.name);
+    void runWorkflowChain(wf, thread, 0);
+  };
+
+  const resumeWorkflow = (event: { kind: "human_input"; text: string } | { kind: "approval" }) => {
+    if (cannotStartTurn()) return;
+    const thread = threadsRef.current.find((t) => t.id === activeThreadId);
+    if (!thread) return;
+    const pause = resumableWorkflow(thread);
+    if (!pause || pause.gate.kind !== event.kind) return;
+    const decision = event.kind === "approval"
+      ? "Workflow decision: I approve the plan. Continue to the next step, keeping any tool review separate."
+      : event.text.trim();
+    // A human reply is evidence for the next prompt, not another agent turn.
+    if (decision && saveWorkflowCheckpoint(thread.id, undefined, decision)) {
+      void runWorkflowChain(pause.workflow, thread, pause.nextStep);
+    }
+  };
+
+  const handleSendMessage = (text: string) => {
+    if (cannotStartTurn() || !text.trim()) return;
+    if (activeThread?.pendingWorkflow) {
+      resumeWorkflow({ kind: "human_input", text });
+      return;
+    }
+    stopRunRef.current = false;
+    const title = text.slice(0, 45) + (text.length > 45 ? "…" : "");
+    const thread = activeThread ?? createThread(activeBot, selectedModel, title);
+    void sendTurn(text, thread);
+  };
+
+  const cancelPendingWorkflow = () => {
+    if (cannotStartTurn()) return;
+    const thread = threadsRef.current.find((t) => t.id === activeThreadId);
+    if (!thread?.pendingWorkflow) return;
+    const pause = resumableWorkflow(thread);
+    const decision = pause?.gate.kind === "approval" ? "Workflow decision: I declined the plan and ended the workflow." : undefined;
+    if (!saveWorkflowCheckpoint(thread.id, undefined, decision)) return;
+    if (pause) {
+      setWorkflowHistory((prev) => ({ ...prev, [thread.id]: {
+        name: pause.workflow.name, step: pause.nextStep, total: pause.workflow.steps.length, state: "cancelled",
+      } }));
+    }
+    setOutcomes((prev) => ({ ...prev, [thread.id]: "cancelled" }));
   };
 
   const handleApproveTool = (toolCallId: string) => {
@@ -847,7 +959,8 @@ export const App: React.FC = () => {
   return (
     <div className="warm-workspace">
       <div className="app-shell">
-        <WorkspaceTitlebar workspace={workspace} browserPreview={!isTauriEnvironment()} onHelp={() => setDialog("help")} />
+        <WorkspaceTitlebar workspace={workspace} browserPreview={!isTauriEnvironment()} auditRecordingFailed={auditRecordingFailed}
+          auditUnavailable={busy && view !== "audit"} onAudit={() => navigate("audit")} onHelp={() => setDialog("help")} />
         <div className="main-layout">
           <WorkspaceSidebar view={view} onNavigate={navigate} onNew={handleNewThread} workspace={workspace} status={runStatus} pending={pending.length} busy={busy} />
           <main className={`surface ${inConversation && !openInspector ? "inspector-closed" : ""}`} aria-label="Workspace">
@@ -880,7 +993,7 @@ export const App: React.FC = () => {
                     <AnyBotCharacter mood={welcomeMood} className="mascot" size={110} />
                     <h2>{activeThread?.isRoom ? threadTitle : activeBot.name}</h2>
                     <p>{activeThread?.isRoom ? `Mention up to three agents with @ and they’ll answer in order. Without a mention, ${roomMembers[0]?.name ?? "the primary agent"} responds.` : activeBot.description}</p>
-                    {!activeThread?.isRoom && <div className="suggestions">{starters.map((item) => {
+                    {!activeThread?.isRoom && !activeThread?.pendingWorkflow && <div className="suggestions">{starters.map((item) => {
                       const needsTools = !!item.toolsRequired && !selectedModel.supportsTools;
                       return <button className="suggestion" type="button" key={item.title} disabled={needsTools || busy}
                         title={needsTools ? "Choose a tool-capable model to run this" : item.subtitle} onClick={() => void handleSendMessage(item.prompt)}>
@@ -896,7 +1009,6 @@ export const App: React.FC = () => {
                         if (!pending.some((tool) => tool.id === id && tool.name === "write_file")) return;
                         const resolve = approvalResolversRef.current.get(id);
                         if (!resolve) return;
-                        if (workflowProgress) stopWorkflowRef.current = true;
                         approvalResolversRef.current.delete(id);
                         resolve(false, feedback);
                       }}
@@ -906,18 +1018,33 @@ export const App: React.FC = () => {
                   </>}
                 </div>
 
+                {workflowSaveError && workflowSaveError.threadId === activeThreadId && <div className="room-info workflow-pause" role="alert">{workflowSaveError.message}</div>}
+                {activeThread?.pendingWorkflow && !busy && (
+                  <div className="room-info workflow-pause">
+                    <span className="grow" role="status">{pausedWorkflow?.gate.kind === "approval"
+                      ? "Review the plan before continuing. Proposed file changes still need their own approval."
+                      : pausedWorkflow ? "Workflow paused for your input. Reply here to continue."
+                        : "This workflow can’t resume with its saved steps, agent, or model. End it to return to chat."}</span>
+                    <div className="workflow-actions">
+                      {pausedWorkflow?.gate.kind === "approval" && <button type="button" className="btn primary small" onClick={() => resumeWorkflow({ kind: "approval" })}>Approve plan &amp; continue</button>}
+                      <button type="button" className="btn small" onClick={cancelPendingWorkflow}>{pausedWorkflow?.gate.kind === "approval" ? "Decline & end workflow" : "End workflow"}</button>
+                    </div>
+                  </div>
+                )}
                 {!isNearBottom && !!currentTranscript.length && <button type="button" className="btn small jump-latest" onClick={jumpToLatest}><ArrowDown className="icon sm" aria-hidden="true" />{pending.length ? "Review latest action" : "Jump to latest"}</button>}
-                <Composer key={activeThreadId ?? "new"} onSendMessage={handleSendMessage} onStop={handleStop} isGenerating={busy} isStopping={isStopping}
-                  isAwaitingApproval={pending.length > 0} selectedModel={selectedModel} onSelectModel={handleSelectModel}
-                  mentionCandidates={activeThread?.isRoom ? roomMembers : undefined} botName={activeThread?.isRoom ? activeThread.title : activeBot.name} />
+                {(!activeThread?.pendingWorkflow || pausedWorkflow?.gate.kind === "human_input" || busy) && (
+                  <Composer key={activeThreadId ?? "new"} onSendMessage={handleSendMessage} onStop={handleStop} isGenerating={busy} isStopping={isStopping}
+                    isAwaitingApproval={pending.length > 0} selectedModel={selectedModel} onSelectModel={handleSelectModel}
+                    mentionCandidates={activeThread?.isRoom ? roomMembers : undefined} botName={activeThread?.isRoom ? activeThread.title : activeBot.name} />
+                )}
               </section>
               {openInspector && <Inspector key={activeThreadId ?? "new"} overlay={inspectorOverlay} status={runStatus} thread={activeThread} bot={activeBot} model={selectedModel}
-                entries={currentTranscript} workspace={workspace} workflow={workflowProgress ?? (activeThreadId ? workflowHistory[activeThreadId] : undefined)} busy={busy}
+                entries={currentTranscript} workspace={workspace} workflow={threadWorkflow} busy={busy}
                 safeTools={vault.autoApproveSafeTools !== false && activeBot.autoApproveSafeTools} onAudit={() => navigate("audit")} onSettings={() => navigate("settings")} onClose={() => setInspectorOverlay(false)} />}
             </> : view === "settings" ? <SettingsModal embedded isOpen onClose={() => navigate("chats")} vault={vault} onSaveVault={handleSaveVault} />
               : <WorkspacePages page={view as Exclude<WorkspaceView, "chats" | "settings">} bots={bots} workflows={workflows} rooms={threads.filter((thread) => thread.isRoom)}
                 cwd={systemInfo?.cwd ?? ""} homeDir={systemInfo?.homeDir} model={view === "workflows" ? workflowModel ?? selectedModel : selectedModel} activeBot={activeBot} busy={busy}
-                onChooseModel={() => setDialog("model")} onNewRoom={newRoom} onSelectRoom={handleSelectThread}
+                auditRecordingFailed={auditRecordingFailed} onChooseModel={() => setDialog("model")} onNewRoom={newRoom} onSelectRoom={handleSelectThread}
                 onSelectBot={chooseBot} onEditBot={(id) => setEditingBot(bots.find((bot) => bot.id === id) ?? null)} onCreateBot={handleCreateNewBot}
                 onRunWorkflow={(id) => { const workflow = workflows.find((item) => item.id === id); if (workflow) void handleRunWorkflow(workflow); }} />}
           </main>
@@ -935,13 +1062,13 @@ export const App: React.FC = () => {
           if (view === "workflows") setWorkflowModel(model);
           else handleSelectModel(model);
           setDialog(null);
-        }}><span className="grow"><strong>{model.name}</strong><small>{model.isByop ? "Local CLI" : model.provider}</small></span><span className="tag">{model.supportsTools ? "Tools" : "Chat only"}</span>{dialogModel.id === model.id && <span className="tag">Current</span>}</button>)}</div>}
+        }}><span className="grow"><strong>{model.name}</strong><small>{isCliModel(model) ? "Local CLI" : model.provider}</small></span><span className="tag">{isCliModel(model) ? "CLI-managed" : model.supportsTools ? "Tools" : "Chat only"}</span>{dialogModel.id === model.id && <span className="tag">Current</span>}</button>)}</div>}
         {dialog === "thread" && activeThread && <div className="option-list">
           <form className="field thread-rename" onSubmit={(event) => {
             event.preventDefault();
             const title = String(new FormData(event.currentTarget).get("title") ?? "").trim();
             if (!title) return;
-            setThreads((prev) => prev.map((thread) => thread.id === activeThread.id ? { ...thread, title } : thread));
+            updateThreads((prev) => prev.map((thread) => thread.id === activeThread.id ? { ...thread, title } : thread));
             setDialog(null);
           }}><label htmlFor="conversation-name">Conversation name</label><div className="flex gap-8"><input id="conversation-name" name="title" defaultValue={activeThread.title} maxLength={100} required /><button type="submit" className="btn small">Rename</button></div></form>
           <button type="button" className="option-item" onClick={() => { handleTogglePinThread(activeThread.id); setDialog(null); }}>{activeThread.isPinned ? "Unpin conversation" : "Pin conversation"}</button>

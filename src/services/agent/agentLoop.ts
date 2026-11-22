@@ -25,6 +25,10 @@ interface RunContext {
   pendingProposals: Set<string>;
   /** Shell executions currently running, so Stop can kill them natively. */
   runningShellCalls: Map<string, true>;
+  /** Failed attempts by exact action, after resolving execution arguments. */
+  failedActions: Map<string, { round: number; callIds: string[] }>;
+  /** Declined, blocked or unsupported actions cannot be recovered by a retry. */
+  hasBlockedAction: boolean;
 }
 
 /** Honest terminal outcome of a whole run chain. */
@@ -54,6 +58,32 @@ async function resolveCwd(explicit?: string): Promise<string | undefined> {
     }
   }
   return cachedSystemCwd || undefined;
+}
+
+function toolActionKey({ name, arguments: args }: ToolCallItem): string | undefined {
+  switch (name) {
+    case "execute_shell": return JSON.stringify([name, args.command, args.cwd]);
+    case "write_file": return JSON.stringify([name, args.path, args.content]);
+    case "read_file": return JSON.stringify([name, args.path, args.max_lines]);
+    case "list_directory": return JSON.stringify([name, args.path]);
+    case "delegate_task": return JSON.stringify([name, args.bot, args.task]);
+  }
+}
+
+function recordToolOutcome(run: RunContext, tool: ToolCallItem, round: number) {
+  const key = toolActionKey(tool);
+  if (!key || (tool.status !== "completed" && tool.status !== "failed")) {
+    run.hasBlockedAction = true;
+    return;
+  }
+  const earlier = run.failedActions.get(key);
+  if (tool.status === "failed") {
+    run.failedActions.set(key, { round, callIds: [...(earlier?.callIds ?? []), tool.id] });
+  } else if (earlier && earlier.round < round) {
+    // Calls emitted together cannot be retries based on one another's result.
+    tool.recoveredToolCallIds = earlier.callIds;
+    run.failedActions.delete(key);
+  }
 }
 
 export class AgentLoop {
@@ -123,6 +153,8 @@ export class AgentLoop {
       pendingApprovals: new Set(),
       pendingProposals: new Set(),
       runningShellCalls: new Map(),
+      failedActions: new Map(),
+      hasBlockedAction: false,
     };
     this.activeRun = run;
     try {
@@ -135,7 +167,9 @@ export class AgentLoop {
       // can no longer detach a newer run's controller or approvals.
       if (this.activeRun === run) this.activeRun = null;
     }
-    return run.aborted ? "cancelled" : run.hadError ? "failed" : "completed";
+    if (run.aborted) return "cancelled";
+    if (run.hadError || run.hasBlockedAction || run.failedActions.size) return "failed";
+    return "completed";
   }
 
   private async executeTurn(
@@ -148,7 +182,8 @@ export class AgentLoop {
     onAddEntry: (entry: TranscriptEntry) => void,
     onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean, revision?: string) => void) => void,
     run: RunContext,
-    authorBotId?: string
+    authorBotId?: string,
+    round = 0
   ): Promise<void> {
     const signal = run.controller.signal;
 
@@ -179,14 +214,15 @@ export class AgentLoop {
               role: "tool",
               tool_call_id: tc.id,
               name: tc.name,
-              content: tc.result?.output || tc.result?.error || "Execution completed.",
+              content: [`Tool status: ${tc.status}`, tc.result?.error, tc.result?.output]
+                .filter(Boolean).join("\n"),
             });
           }
         }
       }
     }
 
-    const assistantEntryId = `asst_${Date.now()}`;
+    const assistantEntryId = `asst_${run.id}_${round}`;
     const startTime = Date.now();
     let currentContent = "";
     let currentThinking = "";
@@ -264,25 +300,26 @@ export class AgentLoop {
         for (let i = 0; i < toolCalls.length; i++) {
           if (run.aborted || signal.aborted) return;
           const tc = toolCalls[i];
-          await this.executeToolWithSafety(
-            tc,
-            bot,
-            vault,
-            run,
-            (updatedTc) => {
-              toolCalls[i] = updatedTc;
-              // Preserve what the model already streamed — tool status
-              // changes must never erase the assistant's prose.
-              onUpdateEntry({
-                ...assistantEntry,
-                content: currentContent,
-                thinking: currentThinking,
-                isThinkingActive: false,
-                toolCalls: [...toolCalls],
-              });
-            },
-            onNeedsApproval
-          );
+          const updateCall = (updatedTc: ToolCallItem) => {
+            toolCalls[i] = updatedTc;
+            onUpdateEntry({
+              ...assistantEntry,
+              content: currentContent,
+              thinking: currentThinking,
+              isThinkingActive: false,
+              toolCalls: [...toolCalls],
+            });
+          };
+          if (!model.supportsTools || !toolActionKey(tc)) {
+            run.hasBlockedAction = true;
+            tc.status = "failed";
+            tc.result = { error: `Tool ${tc.name || "(unnamed)"} is unavailable for this turn.` };
+            updateCall(tc);
+            continue;
+          }
+          await this.executeToolWithSafety(tc, bot, vault, run, updateCall, onNeedsApproval);
+          recordToolOutcome(run, tc, round);
+          if (tc.recoveredToolCallIds) updateCall(tc);
         }
 
         if (run.aborted || signal.aborted) return;
@@ -307,7 +344,8 @@ export class AgentLoop {
           onAddEntry,
           onNeedsApproval,
           run,
-          authorBotId
+          authorBotId,
+          round + 1
         );
       }
     } catch (err: any) {
@@ -558,14 +596,13 @@ export class AgentLoop {
         } finally {
           run.runningShellCalls.delete(toolCall.id);
         }
-        if (run.aborted) {
-          toolCall.status = "rejected";
-          toolCall.result = { error: "Killed by user (Stop)." };
-        } else {
-          toolCall.status = res.success ? "completed" : "failed";
-        }
+        const succeeded = res.success && res.exit_code === 0;
+        toolCall.status = run.aborted ? "rejected" : succeeded ? "completed" : "failed";
         toolCall.result = {
+          error: run.aborted ? "Stop requested while the command was running."
+            : succeeded ? undefined : `Command failed (exit code ${res.exit_code}).`,
           output: res.stdout + (res.stderr ? `\nSTDERR:\n${res.stderr}` : ""),
+          exitCode: res.exit_code,
           executionTimeMs: Number(res.execution_time_ms),
         };
       } else if (toolCall.name === "read_file") {
@@ -594,7 +631,9 @@ export class AgentLoop {
           );
           toolCall.status = res.success ? "completed" : "failed";
           toolCall.result = {
-            output: `Wrote ${res.size_bytes} bytes to ${res.path}`,
+            ...(res.success
+              ? { output: `Wrote ${res.size_bytes} bytes to ${res.path}` }
+              : { error: `Write failed for ${res.path}.` }),
             diff: reviewed,
           };
         }

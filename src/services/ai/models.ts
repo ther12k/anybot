@@ -1,5 +1,7 @@
 import { AIModel } from "../../types";
 
+export const isCliModel = (model: AIModel) => model.provider === "acp" || model.isByop === true;
+
 export const AVAILABLE_MODELS: AIModel[] = [
   // Bring-Your-Own-Plan (BYOP) & Agent Client Protocol (ACP)
   {
