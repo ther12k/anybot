@@ -1,7 +1,8 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 import { Check, ExternalLink, HardDrive, Key, Loader2, ScrollText, Shield, Sparkles, Terminal, X } from "lucide-react";
 import { VaultConfig, DetectedAgentCli } from "../../types";
-import { TauriBridge, isTauriEnvironment } from "../../services/tauri/bridge";
+import { TauriBridge, isTauriEnvironment, type AuditVerification } from "../../services/tauri/bridge";
+import { auditRequestError, describeAuditVerification } from "../Workspace/AuditReport";
 import "./SettingsModal.css";
 
 interface SettingsModalProps {
@@ -15,9 +16,8 @@ interface SettingsModalProps {
 type SaveState = "idle" | "saving" | "saved" | "error";
 type CliScan = { state: "loading" | "error" } | { state: "done"; clis: DetectedAgentCli[] };
 type AuditCheck =
-  | { state: "idle" | "checking" }
-  | { state: "done"; result: Awaited<ReturnType<typeof TauriBridge.verifyAuditLog>> }
-  | { state: "error"; message: string };
+  | { state: "idle" | "checking" | "error" }
+  | { state: "done"; result: AuditVerification };
 
 const sections = [
   { id: "providers", label: "Providers", Icon: Sparkles },
@@ -122,11 +122,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     try {
       const result = await TauriBridge.verifyAuditLog();
       setAuditCheck({ state: "done", result });
-    } catch (error) {
-      setAuditCheck({ state: "error", message: error instanceof Error ? error.message : String(error) });
+    } catch {
+      setAuditCheck({ state: "error" });
     }
   };
 
+  const auditDescription = auditCheck.state === "done" ? describeAuditVerification(auditCheck.result) : null;
   const saving = saveState === "saving";
   const providers = (
     <section className="settings-section" aria-labelledby={`${id}-providers`}>
@@ -211,14 +212,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="min-w-0 grow">
           <span className="anybot-setting-label">Audit log integrity</span>
           <p role="status" className="break-words">
-            {!desktop ? "Audit verification requires the desktop app." : auditCheck.state === "checking" ? "Verifying the audit chain…" : auditCheck.state === "done" ? (
-              auditCheck.result.valid
-                ? `Audit chain intact — ${auditCheck.result.hashed_rows} verified ${auditCheck.result.hashed_rows === 1 ? "row" : "rows"}${auditCheck.result.legacy_rows > 0 ? ` (+${auditCheck.result.legacy_rows} pre-chain)` : ""}.`
-                : <span className="text-danger">Audit chain broken at row {auditCheck.result.first_break ?? "unknown"}.</span>
+            {!desktop ? "Audit verification requires the desktop app." : auditCheck.state === "checking" ? "Verifying the audit chain…" : auditDescription ? (
+              <span className={auditDescription.tone === "warning" ? "text-danger" : undefined}>{auditDescription.title} {auditDescription.detail}</span>
             ) : auditCheck.state === "error" ? (
-              <span className="text-danger">Could not verify the audit log: {auditCheck.message}</span>
-            ) : "Check the tamper-evident chain that links audit entries."}
+              <span className="text-danger">Audit verification unavailable. {auditRequestError}</span>
+            ) : "Check the hash chain that links audit entries."}
           </p>
+          {auditCheck.state === "done" && auditCheck.result.status === "consistent" && <p>A consistent chain does not prove that every action was recorded.</p>}
         </div>
         <button type="button" className="btn shrink-0" disabled={!desktop || auditCheck.state === "checking"} onClick={verifyAudit}>
           <ScrollText className="icon" aria-hidden="true" /> Verify

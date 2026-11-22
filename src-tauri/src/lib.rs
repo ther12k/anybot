@@ -1,13 +1,16 @@
+mod audit;
 pub mod commands;
 pub mod models;
 pub mod policy;
 pub mod proposal;
+mod reviewed_file;
 pub mod security;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            audit::init_notifications(app.handle());
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -31,7 +34,8 @@ pub fn run() {
             policy::save_standing_grants,
             policy::record_rejection_audit,
             policy::record_delegation_audit,
-            policy::verify_audit_log,
+            audit::verify_audit_log,
+            audit::has_audit_recording_failure,
             proposal::create_write_proposal,
             proposal::create_shell_proposal,
             proposal::approve_proposal,

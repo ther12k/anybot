@@ -5,9 +5,10 @@ use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
+use crate::audit::record_audit;
 use crate::commands::fs::command_touches_protected_path;
 use crate::models::{CommandSafetyResult, CommandSafetyTier, ShellCommandResult};
-use crate::policy::{audit, load_policy, load_standing_grants_sync};
+use crate::policy::{load_policy, load_standing_grants_sync};
 use crate::proposal::consume_shell_proposal;
 use crate::security::{evaluate_command_safety, evaluate_with_policy};
 
@@ -120,7 +121,7 @@ fn audit_shell(
     call_id: &str,
     proposal_id: Option<&str>,
 ) {
-    audit(serde_json::json!({
+    let _ = record_audit(serde_json::json!({
         "tool": "execute_shell",
         "decision": decision,
         "proposal_id": proposal_id,
@@ -133,8 +134,8 @@ fn audit_shell(
 }
 
 /// Spawn a shell command as its own process group, register it under
-/// `call_id` while it runs, and collect stdout/stderr/exit status. Every
-/// finished execution writes one audit row.
+/// `call_id` while it runs, and collect stdout/stderr/exit status. Report
+/// recording failure separately from the execution outcome.
 ///
 /// Trust boundary: the frontend's `decision` string is ignored for
 /// approval — the policy is re-evaluated here against the CURRENT policy
@@ -145,7 +146,7 @@ pub async fn run_tracked(
     cwd: Option<String>,
     timeout_secs: u64,
     call_id: String,
-    decision: Option<String>,
+    _decision: Option<String>,
     proposal_id: Option<String>,
 ) -> Result<ShellCommandResult, String> {
     let start_time = Instant::now();

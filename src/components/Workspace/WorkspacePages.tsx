@@ -6,10 +6,12 @@ import {
   Search, ShieldCheck, Sparkles, Users, Workflow, X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { AVAILABLE_MODELS } from "../../services/ai/models";
-import { isTauriEnvironment, TauriBridge } from "../../services/tauri/bridge";
+import { AVAILABLE_MODELS, isCliModel } from "../../services/ai/models";
+import { isTauriEnvironment, TauriBridge, type AuditVerification } from "../../services/tauri/bridge";
+import { modelCanRunWorkflow } from "../../services/workflow";
 import type { AIModel, BotCategory, BotPersona, BotWorkflow, Thread } from "../../types";
 import AnyBotCharacter from "../Tavi/AnyBotCharacter";
+import { AuditReport, auditRequestError } from "./AuditReport";
 import "./WorkspacePages.css";
 
 export interface WorkspacePagesProps {
@@ -22,6 +24,7 @@ export interface WorkspacePagesProps {
   model?: AIModel;
   activeBot?: BotPersona;
   busy?: boolean;
+  auditRecordingFailed: boolean;
   onChooseModel?: () => void;
   onNewRoom: () => void;
   onSelectRoom: (id: string) => void;
@@ -186,14 +189,14 @@ function RoomsPage({ rooms, onNewRoom, onSelectRoom }: WorkspacePagesProps) {
 function WorkflowsPage({ workflows, activeBot, model, busy, onChooseModel, onRunWorkflow }: WorkspacePagesProps) {
   const [detailId, setDetailId] = useState<string | null>(null);
   const detail = workflows.find(({ id }) => id === detailId);
-  const cannotRun = (workflow: BotWorkflow) => !model || busy || !workflow.steps.length || (workflow.toolsRequired && !model.supportsTools);
+  const cannotRun = (workflow: BotWorkflow) => !model || busy || !modelCanRunWorkflow(workflow, model);
   const run = (workflow: BotWorkflow) => {
     if (cannotRun(workflow)) return;
     setDetailId(null);
     onRunWorkflow(workflow.id);
   };
   const capability = (workflow: BotWorkflow) => workflow.toolsRequired
-    ? <Tag>Requires tools</Tag> : <Tag color="green">Chat compatible</Tag>;
+    ? <Tag>Requires AnyBot tools</Tag> : <Tag color="green">Chat compatible</Tag>;
 
   return (
     <section className="page workspace-secondary">
@@ -233,11 +236,12 @@ function WorkflowsPage({ workflows, activeBot, model, busy, onChooseModel, onRun
           })}
         </div>
         {!workflows.length && <div className="empty-state"><h2>No workflows yet.</h2><p>Available workflows will appear here.</p></div>}
-        <InfoBanner icon={model?.supportsTools ? ShieldCheck : Info} className={`workspace-after-content ${!model?.supportsTools ? "amber" : ""}`}>
+        <InfoBanner icon={model?.supportsTools && !isCliModel(model) ? ShieldCheck : Info} className="workspace-after-content">
           {busy ? "Wait for the current run to finish before starting another workflow."
             : !model ? "Choose a model before starting a workflow."
+            : isCliModel(model) ? "This CLI manages its own tools. Choose an API or Ollama model for workflows with AnyBot tool reviews or plan approval."
             : !model.supportsTools ? "Your selected model is chat-only. Workflows that need tools are disabled."
-            : "Workflows use the current agent and model. Any action that needs approval pauses the run for your review."}
+            : "Workflows use the current agent and model. AnyBot tool reviews and workflow checkpoints pause the run for you."}
         </InfoBanner>
         <div className="section-heading"><h2>Recent runs</h2></div>
         <InfoBanner>Workflow history is not saved separately. Open Chats to review the conversation where a workflow ran.</InfoBanner>
@@ -248,10 +252,13 @@ function WorkflowsPage({ workflows, activeBot, model, busy, onChooseModel, onRun
         <div className="flex gap-8 workspace-tag-group">{activeBot && <Tag color="purple">{activeBot.name}</Tag>}{capability(detail)}</div>
         <ol className="workspace-steps">
           {detail.steps.map((step, index) => <li className="workflow-detail-step" key={index}>
-            <span className="workflow-num" aria-hidden="true">{index + 1}</span><strong>{step}</strong>
+            <span className="workflow-num" aria-hidden="true">{index + 1}</span>
+            <strong>{typeof step === "string" ? step : step.kind === "approval"
+              ? "Your decision — approve the plan to continue or decline to end the workflow."
+              : "Your reply — the workflow waits here until you respond."}</strong>
           </li>)}
         </ol>
-        <p className="caption-note">Each step runs as an agent turn and waits for the previous turn to finish.</p>
+        <p className="caption-note">A failed step stops the workflow. Checkpoints wait for a reply or decision before the next step is sent.</p>
       </DetailDialog>}
     </section>
   );
@@ -333,7 +340,6 @@ function AgentsPage({ bots, onSelectBot, onEditBot, onCreateBot }: WorkspacePage
 
 type FileEntry = Awaited<ReturnType<typeof TauriBridge.listDirEntries>>[number];
 type FilePreview = Awaited<ReturnType<typeof TauriBridge.readFileContent>>;
-type AuditVerification = Awaited<ReturnType<typeof TauriBridge.verifyAuditLog>>;
 type LoadState<T> = { status: "idle" | "loading" | "error" } | { status: "ready"; data: T };
 
 const MAX_FILE_SIZE = 256 * 1024;
@@ -444,7 +450,7 @@ function FilesPage({ cwd, homeDir }: Pick<WorkspacePagesProps, "cwd" | "homeDir"
   );
 }
 
-function AuditPage() {
+function AuditPage({ recordingFailed }: { recordingFailed: boolean }) {
   const desktop = isTauriEnvironment();
   const [report, setReport] = useState<LoadState<AuditVerification>>({ status: "idle" });
   const [explanation, setExplanation] = useState(false);
@@ -460,43 +466,32 @@ function AuditPage() {
 
   return (
     <section className="page workspace-secondary">
-      <PageHeader eyebrow="A clear record, not a black box" title="Every action has a story."
-        description="Check the integrity of AnyBot’s local audit log."
+      <PageHeader eyebrow="Local activity" title="Audit log"
+        description="Check the local hash chain and review recent recorded outcomes."
         action={<Action icon={ShieldCheck} variant="primary" onClick={verify} disabled={!desktop || report.status === "loading"}>
           {report.status === "loading" ? "Verifying…" : "Verify chain"}
         </Action>} />
       <div className="page-body">
+        {recordingFailed && <div className="audit-result recording-warning">
+          <AlertTriangle className="icon lg" aria-hidden="true" /><div><h2>Some audit activity may be missing.</h2>
+            <p>At least one entry could not be saved since AnyBot started. Actions that already ran were not undone. Check that AnyBot can write to its local audit storage.</p></div>
+        </div>}
+        {!desktop && <InfoBanner>Audit verification is available in the desktop app.</InfoBanner>}
+        {desktop && report.status === "idle" && <p className="small muted">Verify the chain to see the result and recent activity.</p>}
         {report.status === "loading" && <p className="small muted" role="status">Checking the local audit chain…</p>}
         {report.status === "error" && <div className="audit-result invalid" role="alert">
-          <AlertTriangle className="icon lg" aria-hidden="true" /><div><h3>Could not verify the audit log.</h3><p>Try verifying the chain again.</p></div>
+          <AlertTriangle className="icon lg" aria-hidden="true" /><div><h2>Audit verification unavailable.</h2><p>{auditRequestError}</p></div>
         </div>}
-        {report.status === "ready" && <div className={`audit-result${report.data.valid ? "" : " invalid"}`} role="status">
-          {report.data.valid ? <ShieldCheck className="icon lg" aria-hidden="true" /> : <AlertTriangle className="icon lg" aria-hidden="true" />}
-          <div>
-            <h3>{!report.data.valid ? "Integrity check failed." : report.data.hashed_rows ? "Local hash chain is consistent." : "No hashed entries to verify."}</h3>
-            <p>{report.data.valid ? `${report.data.hashed_rows} chained ${report.data.hashed_rows === 1 ? "entry" : "entries"} checked with SHA-256.`
-              : report.data.first_break ? `The chain first breaks at record ${report.data.first_break}. The log was not modified.` : "The log was not modified."}</p>
-          </div>
-        </div>}
-        <div className="audit-filters">
-          <span className="small muted">Verification summary</span>
+        {report.status === "ready" && <AuditReport report={report.data} />}
+        <div className="audit-filters workspace-after-content">
+          <span className="small muted">A consistent chain does not prove that every action was recorded.</span>
           <button type="button" className="text-link workspace-toolbar-note" onClick={() => setExplanation(true)}>How verification works</button>
         </div>
-        <div className="table-wrap">
-          <table className="audit-table">
-            <thead><tr><th scope="col">Entries checked</th><th scope="col">Chained</th><th scope="col">Legacy</th><th scope="col">First break</th></tr></thead>
-            <tbody>{report.status === "ready" ? <tr>
-              <td><strong>{report.data.total_rows}</strong></td><td>{report.data.hashed_rows}</td>
-              <td>{report.data.legacy_rows}</td><td>{report.data.first_break ?? "None found"}</td>
-            </tr> : <tr><td colSpan={4}>{!desktop ? "Audit verification is available in the desktop app."
-              : report.status === "loading" ? "Verification in progress…" : "Verify the chain to see the result."}</td></tr>}</tbody>
-          </table>
-        </div>
-        <InfoBanner className="workspace-after-content">The desktop app exposes the verification result, not individual protected log entries or an export.</InfoBanner>
       </div>
       {explanation && <DetailDialog title="How verification works" description="A local check of the audit log’s internal consistency." onClose={() => setExplanation(false)}>
-        <p className="small">The desktop app recomputes each chained record’s SHA-256 hash and checks its link to the previous record. Older entries without hashes cannot be verified.</p>
-        <p className="caption-note">A consistent chain does not prove the log is complete or independently trusted.</p>
+        <p className="small">AnyBot recomputes each chained record’s SHA-256 hash and checks its link to the previous record. Older entries without hashes cannot be verified.</p>
+        <p className="small">A consistent chain can’t reveal actions that were never recorded or a suffix removed at a record boundary. It does not prove that the log is complete or independently trusted.</p>
+        <p className="caption-note">The activity view shows a limited summary, not raw log entries or an export. Tools run by external CLI agents are not part of this log.</p>
       </DetailDialog>}
     </section>
   );
@@ -508,6 +503,6 @@ export default function WorkspacePages(props: WorkspacePagesProps) {
     case "workflows": return <WorkflowsPage {...props} />;
     case "agents": return <AgentsPage {...props} />;
     case "files": return <FilesPage key={`${props.cwd}\0${props.homeDir ?? ""}`} cwd={props.cwd} homeDir={props.homeDir} />;
-    case "audit": return <AuditPage />;
+    case "audit": return <AuditPage recordingFailed={props.auditRecordingFailed} />;
   }
 }

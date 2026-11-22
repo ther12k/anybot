@@ -9,6 +9,22 @@ export type StandingGrant =
   | string
   | { command: string; cwd?: string };
 
+export interface AuditActivity {
+  record: number;
+  tool: "execute_shell" | "read_file" | "write_file" | "list_directory" | "delegate_task";
+  outcome: "completed" | "failed" | "blocked" | "rejected" | "cancelled" | "killed" | "timeout";
+  timestamp: string | null;
+}
+
+export interface AuditVerification {
+  status: "missing" | "empty" | "legacy_only" | "consistent" | "broken" | "unreadable";
+  total_rows: number;
+  hashed_rows: number;
+  legacy_rows: number;
+  first_break: number | null;
+  recent: AuditActivity[];
+}
+
 // Check if running inside Tauri webview
 export const isTauriEnvironment = (): boolean => {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -49,18 +65,10 @@ async function safeInvoke<T>(cmd: string, args: Record<string, any> = {}): Promi
     return true as unknown as T;
   }
   if (cmd === "record_rejection_audit" || cmd === "record_delegation_audit") {
-    console.info("[audit]", cmd, args);
     return true as unknown as T;
   }
-  if (cmd === "verify_audit_log") {
-    return {
-      total_rows: 0,
-      hashed_rows: 0,
-      legacy_rows: 0,
-      valid: true,
-      first_break: null,
-      tip_hash: null,
-    } as unknown as T;
+  if (cmd === "verify_audit_log" || cmd === "has_audit_recording_failure") {
+    throw new Error("Audit information is available in the desktop app.");
   }
   if (cmd === "execute_shell_command") {
     return {
@@ -287,16 +295,21 @@ export const TauriBridge = {
     return safeInvoke("record_delegation_audit", { fromBot, toBot, toModel, outcome, error });
   },
 
-  /** Walk the audit log's hash chain and report whether it is intact. */
-  verifyAuditLog: async (): Promise<{
-    total_rows: number;
-    hashed_rows: number;
-    legacy_rows: number;
-    valid: boolean;
-    first_break: number | null;
-    tip_hash: string | null;
-  }> => {
+  /** Check the local chain and return a bounded, redacted activity summary. */
+  verifyAuditLog: async (): Promise<AuditVerification> => {
     return safeInvoke("verify_audit_log");
+  },
+
+  hasAuditRecordingFailure: async (): Promise<boolean> => {
+    return safeInvoke("has_audit_recording_failure");
+  },
+
+  onAuditRecordingFailed: async (onFailure: () => void): Promise<() => void> => {
+    const { listen } = await import("@tauri-apps/api/event");
+    const stop = await listen<boolean>("audit-recording-failed", ({ payload }) => {
+      if (payload === true) onFailure();
+    });
+    return () => { void Promise.resolve(stop()).catch(() => {}); };
   },
 
   readFileContent: async (
@@ -406,3 +419,32 @@ export const TauriBridge = {
     return safeInvoke("kill_acp_session", { sessionId });
   },
 };
+
+export function observeAuditRecordingFailure(onFailure: () => void): () => void {
+  if (!isTauriEnvironment()) return () => {};
+  let active = true;
+  let reported = false;
+  let unlisten: (() => void) | undefined;
+  const report = () => {
+    if (!active || reported) return;
+    reported = true;
+    onFailure();
+  };
+  const check = () => {
+    if (!active || reported) return;
+    void TauriBridge.hasAuditRecordingFailure().then((failed) => { if (failed === true) report(); }, () => {});
+  };
+  // Subscribe first, then check the sticky native state so startup or a
+  // renderer reload cannot miss an earlier failure.
+  void TauriBridge.onAuditRecordingFailed(report).then((stop) => {
+    if (!active) { stop(); return; }
+    unlisten = stop;
+    check();
+  }, check);
+  window.addEventListener("focus", check);
+  return () => {
+    active = false;
+    window.removeEventListener("focus", check);
+    unlisten?.();
+  };
+}
