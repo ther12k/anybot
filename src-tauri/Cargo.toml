@@ -28,3 +28,5 @@ libc = "0.2"
 sha2 = "0.11.1"
 keyring = "4.2.0"
 tempfile = "3.27"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

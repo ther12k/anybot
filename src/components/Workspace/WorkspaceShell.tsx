@@ -2,12 +2,13 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Bot, ChevronDown, CircleHelp, ClipboardList, Code2, Filter, Folder, Layers3,
   MessageSquare, Pin, Plus, Search, Settings2, Shield, SquarePen,
-  Users, Workflow, X,
+  Upload, Users, Workflow, X,
 } from "lucide-react";
 import { AnyBotCharacter, type TaviMood } from "../Tavi/AnyBotCharacter";
 import type { AIModel, BotPersona, Thread, ToolCallItem, TranscriptEntry } from "../../types";
 import { isCliModel } from "../../services/ai/models";
 import type { WorkflowState } from "../../services/workflow";
+import { importSourceName } from "../../services/importedConversation";
 
 export type WorkspaceView = "chats" | "rooms" | "workflows" | "agents" | "files" | "audit" | "settings";
 export type RunStatus = { label: string; mood: TaviMood };
@@ -33,9 +34,10 @@ export function Action({ icon: Icon, label, onClick, className = "", disabled, p
     aria-pressed={pressed} aria-expanded={expanded} aria-controls={controls} onClick={onClick} disabled={disabled}><Icon className="icon" aria-hidden="true" /></button>;
 }
 
-export function WorkspaceSidebar({ view, onNavigate, onNew, workspace, status, pending, busy }: {
+export function WorkspaceSidebar({ view, onNavigate, onNew, workspace, status, pending, busy, onWorkspace, workspaceUnavailable }: {
   view: WorkspaceView; onNavigate: (view: WorkspaceView) => void; onNew: () => void;
   workspace: string; status: RunStatus; pending: number; busy: boolean;
+  onWorkspace?: () => void; workspaceUnavailable?: boolean;
 }) {
   const note = status.mood === "approval" ? ["A little checkpoint.", "Your approval, then we’re off."]
     : status.mood === "working" || status.mood === "thinking" ? ["On it.", "One thoughtful step at a time."]
@@ -61,7 +63,8 @@ export function WorkspaceSidebar({ view, onNavigate, onNew, workspace, status, p
       <div className="nav-list">{sections.slice(0, 4).map(renderNav)}</div>
       <div className="nav-separator" />
       <div className="section-label">Workspace</div>
-      <button type="button" className="workspace-btn" title={workspace} aria-label={`Open files: ${workspace}`} onClick={() => onNavigate("files")} disabled={busy}>
+      <button type="button" className="workspace-btn" title={workspace} aria-label={onWorkspace ? `Manage workspaces: ${workspace}` : `Open files: ${workspace}`}
+        aria-haspopup={onWorkspace ? "dialog" : undefined} onClick={onWorkspace ?? (() => onNavigate("files"))} disabled={busy || workspaceUnavailable}>
         <Folder className="icon" aria-hidden="true" /><span className="truncate">{workspace}</span><ChevronDown className="icon sm" aria-hidden="true" />
       </button>
       <div className="nav-list">{sections.slice(4).map(renderNav)}</div>
@@ -74,10 +77,10 @@ export function WorkspaceSidebar({ view, onNavigate, onNew, workspace, status, p
   </aside>;
 }
 
-export function ChatRail({ rooms, threads, entries, bots, active, busy, mobile, onSelect, onNew, onClose }: {
+export function ChatRail({ rooms, threads, entries, bots, active, busy, mobile, onSelect, onNew, onImport, onClose }: {
   rooms: boolean; threads: Thread[]; entries: Record<string, TranscriptEntry[]>; bots: BotPersona[];
   active: string | null; busy: boolean; mobile: boolean;
-  onSelect: (id: string) => void; onNew: () => void; onClose: () => void;
+  onSelect: (id: string) => void; onNew: () => void; onImport?: () => void; onClose: () => void;
 }) {
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
@@ -108,12 +111,17 @@ export function ChatRail({ rooms, threads, entries, bots, active, busy, mobile, 
           return <button key={thread.id} type="button" className={`thread-item ${active === thread.id ? "active" : ""}`} title={title}
             aria-current={active === thread.id ? "true" : undefined} disabled={busy && active !== thread.id} onClick={() => onSelect(thread.id)}>
             <Icon className="icon" aria-hidden="true" /><span className="grow"><span className="thread-title">{title}</span>
-              <span className="thread-meta">{awaiting(thread.id) ? "Waiting for approval" : thread.pendingWorkflow ? "Workflow paused" : rooms ? `${thread.participantBotIds?.length ?? 0} agents` : bots.find((b) => b.id === thread.botId)?.name || "Agent"}</span>
+              <span className="thread-meta">{thread.importedFrom ? `Imported from ${importSourceName(thread.importedFrom)}` :
+                awaiting(thread.id) ? "Waiting for approval" : thread.pendingWorkflow ? "Workflow paused" :
+                rooms ? `${thread.participantBotIds?.length ?? 0} agents` : bots.find((b) => b.id === thread.botId)?.name || "Agent"}</span>
             </span>
           </button>;
         })}
       </section>)}
     </div>
+    {onImport && <button type="button" className="btn rail-import" aria-haspopup="dialog" onClick={onImport} disabled={busy}>
+      <Upload className="icon" aria-hidden="true" />Import session
+    </button>}
     <div className="rail-bottom">{candidates.length} {rooms ? (candidates.length === 1 ? "room" : "rooms") : (candidates.length === 1 ? "conversation" : "conversations")}</div>
   </aside>;
 }
@@ -123,14 +131,14 @@ function ContextRow({ label, children }: { label: string; children: ReactNode })
 }
 
 const toolStates: Record<ToolCallItem["status"], [string, string]> = {
-  pending_approval: ["Needs approval", "amber"], running: ["Running", "purple"],
+  queued: ["Queued", "neutral"], pending_approval: ["Needs approval", "amber"], running: ["Running", "purple"],
   completed: ["Completed", "green"], failed: ["Failed", "red"], rejected: ["Declined", "red"],
 };
 
-export function Inspector({ overlay, status, thread, bot, model, entries, workspace, workflow, busy, safeTools, onAudit, onSettings, onClose }: {
+export function Inspector({ overlay, status, thread, bot, model, entries, workspace, workflow, busy, safeTools, workspaceToolsAvailable, onAudit, onSettings, onClose }: {
   overlay: boolean; status: RunStatus; thread: Thread | null; bot: BotPersona; model: AIModel;
   entries: TranscriptEntry[]; workspace: string; workflow?: WorkflowProgress; busy: boolean;
-  safeTools: boolean; onAudit: () => void; onSettings: () => void; onClose: () => void;
+  safeTools: boolean; workspaceToolsAvailable?: boolean; onAudit: () => void; onSettings: () => void; onClose: () => void;
 }) {
   const [tab, setTab] = useState<"Run" | "Thread" | "Workflow">("Run");
   const cli = isCliModel(model);
@@ -150,17 +158,20 @@ export function Inspector({ overlay, status, thread, bot, model, entries, worksp
           : workflow?.state === "awaiting_input" ? "Your reply starts the next workflow step."
             : status.mood === "approval" ? "Review the proposed action in the conversation before it can run."
               : busy ? "You can stop the run from the composer." : "AnyBot tool activity appears below as it happens."}</p><AnyBotCharacter size={83} mood={status.mood} className="mascot" /></div>
-        {!!tools.length && <div className="step-list">{tools.map((tool) => <div key={tool.id} className={`step ${tool.status === "completed" ? "done" : tool.status === "pending_approval" ? "current" : tool.status === "running" ? "running" : "failed"}`}><span className="step-icon" aria-hidden="true">{tool.status === "completed" ? "✓" : ""}</span><span className="grow">{tool.name}</span><span className={`tag ${toolStates[tool.status][1]}`}>{toolStates[tool.status][0]}</span></div>)}</div>}
+        {!!tools.length && <div className="step-list">{tools.map((tool) => <div key={tool.id} className={`step ${tool.status === "completed" ? "done" : tool.status === "pending_approval" ? "current" : tool.status === "running" ? "running" : tool.status === "queued" ? "" : "failed"}`}><span className="step-icon" aria-hidden="true">{tool.status === "completed" ? "✓" : ""}</span><span className="grow">{tool.name}</span><span className={`tag ${toolStates[tool.status][1]}`}>{toolStates[tool.status][0]}</span></div>)}</div>}
       </section>
       <section className="inspector-card"><h3><Layers3 className="icon" aria-hidden="true" />Context</h3><div className="context-table">
         <ContextRow label="Workspace"><Folder className="icon" aria-hidden="true" />{workspace}</ContextRow>
         <ContextRow label={thread?.isRoom ? "Primary agent" : "Agent"}><Bot className="icon" aria-hidden="true" />{bot.name}</ContextRow>
         <ContextRow label="Model">{model.name}</ContextRow>
-        <ContextRow label="Tools"><Code2 className="icon" aria-hidden="true" />{cli ? "CLI-managed" : model.supportsTools ? "Available" : "Chat only"}</ContextRow>
+        <ContextRow label="Tools"><Code2 className="icon" aria-hidden="true" />{workspaceToolsAvailable !== undefined && cli
+          ? "Unavailable" : cli ? "CLI-managed" : model.supportsTools && workspaceToolsAvailable !== false ? "Available" : "Chat only"}</ContextRow>
       </div></section>
       <section className="inspector-card"><h3><ClipboardList className="icon" aria-hidden="true" />Audit<button className="text-link" type="button" onClick={onAudit} disabled={busy}>View all</button></h3><p className="small muted">Verify the protected audit log in the desktop app.</p></section>
       <section className="inspector-card"><h3><Shield className="icon" aria-hidden="true" />Permissions</h3>{cli
-        ? <p className="small muted">The selected CLI manages its own tools. AnyBot’s tool approvals do not govern CLI actions.</p>
+        ? <p className="small muted">{workspaceToolsAvailable === undefined
+          ? "The selected CLI manages its own tools. AnyBot’s tool approvals do not govern CLI actions."
+          : "External CLI agents are not available in workspaces."}</p>
         : <><div className="policy-row">Safe tools<span className="tag neutral">{safeTools ? "Auto-approve" : "Ask first"}</span></div><div className="policy-row">File writes<span className="tag amber">Review required</span></div></>}
         <div className="policy-row"><button className="text-link" type="button" onClick={onSettings} disabled={busy}>Open settings</button></div></section>
     </>}

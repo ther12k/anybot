@@ -1,6 +1,6 @@
 # AnyBot ⚡ - Autonomous Desktop AI Agent
 
-**AnyBot** is a lightweight desktop AI agent inspired by the architecture and capabilities of **Grok Bot** (`sand`). Built with **Tauri v2**, **Rust**, and **React 18**, AnyBot pairs local system access (terminal execution, file read/write, directory inspection) with modern multi-model AI reasoning (Anthropic Claude, OpenAI, Local Ollama, and xAI Grok).
+**AnyBot** is a desktop AI agent built with **Tauri v2**, **Rust**, and **React 18**. Desktop workspaces pair explicitly granted file tools with Anthropic Claude, OpenAI, Ollama, and xAI Grok models.
 
 ---
 
@@ -48,7 +48,7 @@ During analysis of `grok-bot_0.79.4_amd64.deb` (`@anysphere/grok-bot` / SpaceXAI
 │  │  - Native Shell Executor (process-group tracked)        │  │
 │  │  - Atomic File I/O (audit every read/write outcome)     │  │
 │  │  - Policy re-evaluation at execution (fail-closed)      │  │
-│  │  - Local API-key store (plaintext JSON, see note)       │  │
+│  │  - OS keychain for credentials                          │  │
 │  │  - System Diagnostics (OS, CWD, user environment)       │  │
 │  └─────────────────────────────────────────────────────────┘  │
 └───────────────────────────────────────────────────────────────┘
@@ -103,7 +103,26 @@ Starter prompts are capability-aware: on a chat-only model (e.g. `phi3:mini`), f
 
 ---
 
-## 🛡️ Governance & Permissions (Inspired by OpenBot & Grok Bot)
+## Import a session
+
+In **Chats**, select **Import session** and choose a source:
+
+- **ZCode**: In the desktop app, choose from up to 100 recent, active top-level sessions in the local ZCode CLI store. Select **Preview session**, then **Import session**.
+- **Claude Code**: Choose a session `.jsonl` file. Claude Code typically stores these under `~/.claude/projects/<project>/`.
+
+Imports go into the current workspace as read-only transcripts containing visible user and assistant text. Tool calls and results, approvals, attachments, and reasoning are not imported. Importing does not contact a model or modify the source session. To continue, select **Continue in a new chat** and choose an installed agent. The original stays unchanged; sending a message in the new chat gives the selected model the copied history as context. Imports exceeding 400 messages or 512 KiB of retained data are rejected rather than truncated.
+
+## Private desktop workspaces
+
+Open **Manage workspaces** from the sidebar workspace button. Create or switch workspaces, add folders with **Read-only** or **Read/write** access, then install an agent and explicitly select its tools. A new installation has no grants by default; a file write also requires review of that exact change.
+
+Existing chats and rooms move into the default workspace without automatically granting folders or tools. Uninstalling an agent keeps its history but does not reassign the conversation to a new installation. Rooms share conversation text, not raw tool outputs. Delegation stays within the current workspace, uses the conversation’s model, and gives the recipient no tools.
+
+Chats and workspace configuration are stored on this device. Selecting a cloud model sends conversation context and in-run tool results to that provider. Provider credentials are still configured globally; per-workspace connection bindings and durable run records are not implemented. Shell execution and external CLI/ACP models are not available to workspace bots. The native file checks are not an OS sandbox and do not prevent races with another process that modifies a granted directory.
+
+## 🛡️ Governance & Permissions
+
+The legacy shell and ACP backend endpoints below are not exposed to workspace bots.
 
 * **Deny-First Policy Engine**: Configurable via `~/.config/anybot/policy.json`. Deny patterns (`rm -rf /`, `mkfs`, `dd if=`) and `deny_commands` are evaluated first and cannot be overridden by user grants. Unknown commands default to requiring approval.
 * **Argument-aware classification**: Allowlisted commands are validated by form, not just name — `git branch -D x`, `git branch <new>`, `git remote remove`, `git tag v1`, and `env <cmd>` are all approval-required; `env touch x` no longer inherits `env`'s safe reputation. `cargo check`/`npx` are deliberately NOT auto-approved (build scripts / package installs execute code).
@@ -115,7 +134,7 @@ Starter prompts are capability-aware: on a chat-only model (e.g. `phi3:mini`), f
 * **Local audit logging (`~/.config/anybot/audit.jsonl`)**: AnyBot attempts to record native shell and file outcomes and reported rejections and delegations. If recording fails, the desktop app warns that activity may be missing. Recording is best-effort: it does not undo a command or edit that already ran. Tools run by external CLI agents are not part of this log.
 * **Audit log → Verify chain**: The native verifier checks SHA-256 links for records still present and reports missing, empty, unreadable, legacy-only, consistent, and broken logs separately. A consistent result shows up to 25 checked records with only an action, outcome, record number, and formatted time. Commands, paths, and other raw details are not exposed by the view. Chain consistency does not prove every action was recorded, that appends were durable, or that no complete records were removed from the end.
 * **Bring-Your-Own-Plan (BYOP) & Agent Client Protocol (ACP)**: AnyBot supports running models via your existing active subscriptions (Claude Code CLI `claude`, OpenAI Codex CLI `codex`, OpenCode `opencode`, `zcode`, and Google Antigravity `agy`) with **zero token fees**. The Rust backend automatically scans `$PATH` and local directories for installed agent CLIs, normalizes stream-json/JSON-RPC protocols into unified streaming events, and manages process groups (`SIGKILL` on Stop). Settings displays real-time detection badges for installed agent CLIs, and Composer categorizes models by BYOP Subscriptions vs BYOK API Keys vs Local Offline.
-* **Bot-to-bot delegation (`delegate_task`)**: A tool-capable agent can hand a self-contained task to another persona on the roster (e.g. ask the security reviewer for an assessment) and receives its answer as the tool result. The sub-run is a pure chat completion with **no tool surface** — the delegated bot can neither touch this machine nor delegate further, so delegation needs no approval card. It runs on the persona's default model when that provider has a key, otherwise on the conversation's model; every delegation is recorded in the hash-chained audit log.
+* **Bot-to-bot delegation (`delegate_task`)**: An agent with the delegation grant can ask another installation in the same workspace a self-contained question. The sub-run uses the conversation’s model and has **no tools**; the delegated bot cannot access files or delegate further. AnyBot attempts to record delegation outcomes in the audit log.
 * **Team Rooms (Slack-style multi-agent channels)**: A Room is a thread with several personas plus you. `@mention` routes your message — every mentioned member answers **sequentially**, each seeing its teammates' prior replies (capped at 3 responders per message); a message without a mention goes to the room's **primary agent** (first member picked). Mention completion inserts the unique `@slug` so routing is unambiguous; hand-typed `@FirstName` only counts when it matches exactly one member. Each reply is attributed to its author (avatar + name in the transcript), responders run with a room-context system preamble, delegation audit provenance names the actual speaker, and Stop breaks the responder chain. Crucially, the trust boundary is unchanged: approvals, proposals, and the audit chain still answer to the single local human — the Slack pattern without Slack's autonomy problem.
 * **Stop that actually stops**: Clicking **Stop** cancels streaming, resolves pending approvals as denied, and `SIGKILL`s the shell's process group (Unix). The composer shows **Stopping…** until the run has fully settled — you can't start a new task into a controller a dying run would clear (each run owns its own controller, approvals, and shell registry). Timeouts also kill the whole process group and reap it before reporting.
 * **Platform limits**: process-group kill and timeout cleanup are Unix-only; on Windows the executor kills the process leader only and reports the limitation.
@@ -136,6 +155,5 @@ API keys are stored securely in your operating system's native secret service (G
 
 ## 🧪 Verification status
 
-* 62 Rust tests passed on Linux. They cover the shell classifier and executor, proposal authorization, vault handling, audit verification, ACP stream parsing, and the native reviewed-write → file read → audit path. File tests use disposable files and cover stale saves and competing approvals. Native tests do not exercise the desktop window.
-* TypeScript strict-clean; production build passes. Team Rooms E2E-verified in the browser with real `phi3:mini` streaming: room creation (3 personas, primary badge), sidebar Rooms section, `@` autocomplete filtering + Enter completion (`@researcher `), and mention routing — the reply was authored by **Deep Researcher**, not the sidebar's selected bot; run settled and the composer recovered.
-* Not yet verified: Windows descendant kill, packaged installers, live provider contracts with real credentials, a live `delegate_task` round-trip with a real tool-calling model (the local `phi3:mini` cannot emit tool calls; the browser-preview Verify button exercises the mock path only), and a multi-mention Team Room round (two mentioned agents answering sequentially — the code path mirrors the proven workflow-runner loop, but was not driven live).
+* Rust tests on Linux cover scoped file authorization and limits, cross-workspace delegation, revocation, reviewed writes, and legacy tool behavior using disposable fixtures. JavaScript tests cover chat migration, scoped tool dispatch, approval cards, and provider responses through fixtures. The TypeScript and production build pass.
+* The Linux desktop startup smoke created an empty default workspace with a disposable profile. A live desktop review → apply → audit interaction, packaged installers, and real provider calls remain unverified for workspace bots.

@@ -50,7 +50,10 @@ const shellReplies = (...results) => ({
 const reply = (content, ...tools) => ({ content, tools });
 const finalReply = reply("The fixture checks are done.");
 
-async function runFixture(t, replies, { native, decisions = [], supportsTools = true, sameTick = false } = {}) {
+async function runFixture(t, replies, {
+  native, decisions = [], supportsTools = true, sameTick = false, scope, modelOverrides,
+  vaultOverrides, history = [], onUpdate, loop = new sources.agent.AgentLoop(),
+} = {}) {
   const requests = [];
   const bridge = stubIO(t, sources.bridge.TauriBridge, {
     native,
@@ -76,24 +79,33 @@ async function runFixture(t, replies, { native, decisions = [], supportsTools = 
   t.mock.method(Math, "random", () => 0.123456789012 + ++randomSequence / 1_000_000);
   let entries = [];
   const approvals = [];
-  const outcome = await new sources.agent.AgentLoop().runTurn(
+  const outcome = await loop.runTurn(
     threadId,
-    [{ id: "fixture-user", threadId, timestamp, role: "user", content: "Check the fixture." }],
+    [...history, { id: "fixture-user", threadId, timestamp, role: "user", content: "Check the fixture." }],
     bot,
-    { ...model, supportsTools },
-    vault,
-    (update) => { entries = entries.map((entry) => entry.id === update.id ? structuredClone(update) : entry); },
+    { ...model, supportsTools, ...modelOverrides },
+    { ...vault, ...vaultOverrides },
+    (update) => {
+      entries = entries.map((entry) => entry.id === update.id ? structuredClone(update) : entry);
+      onUpdate?.(structuredClone(update));
+    },
     (entry) => { entries.push(structuredClone(entry)); },
     (tool, resolve) => {
       const approved = decisions[approvals.length];
       approvals.push(structuredClone(tool));
       assert.notEqual(approved, undefined, "Approval was not scripted for this action");
-      resolve(approved);
+      if (typeof approved === "function") approved();
+      else resolve(approved);
     },
+    undefined,
+    scope,
   );
 
   assert.equal(requests.length, replies.length, "Provider reply count");
-  assert.ok(requests.every(({ url }) => url === "http://fixture.invalid/api/chat"), "Only the fixture endpoint is used");
+  const endpoint = modelOverrides?.provider === "openai"
+    ? "https://api.openai.com/v1/chat/completions"
+    : "http://fixture.invalid/api/chat";
+  assert.ok(requests.every(({ url }) => url === endpoint), "Only the expected endpoint is used by the fetch mock");
   assert.equal(approvals.length, decisions.length, "Human approval request count");
   return { outcome, requests, entries, approvals, bridge };
 }
@@ -246,4 +258,316 @@ test("a provider error fails the run and leaves a visible error", async (t) => {
   const { outcome, entries } = await runFixture(t, [new Response("Fixture provider is unavailable.", { status: 503 })]);
   assert.equal(outcome, "failed");
   assert.match(entries[0].content, /503.*fixture provider is unavailable/i);
+});
+
+const workspaceScope = {
+  workspaceId: "fixture-workspace",
+  installationId: "fixture-installation",
+  tools: [],
+};
+const handle = "opaque-fixture-run";
+const path = fixtureWrite.arguments.path;
+const read = { name: "read_file", arguments: { path, max_lines: 5 } };
+const list = { name: "list_directory", arguments: { path: "/fixture/workspace" } };
+function workspaceStubs() {
+  return {
+    startWorkspaceRun: async () => handle,
+    endWorkspaceRun: async () => {},
+  };
+}
+const callArguments = (mock) => mock.mock.calls.map((call) => call.arguments);
+const workspaceProposal = async (_, filePath, content) => ({
+  id: "write-proposal", path: filePath, before: "Current fixture note.", after: content, existed: true,
+});
+
+test("scoped dispatch reuses one handle for filesystem tools and delegation across rounds", async (t) => {
+  const loop = new sources.agent.AgentLoop();
+  const steps = [];
+  const scope = { ...workspaceScope, tools: ["read_file", "list_directory", "write_file", "delegate_task"] };
+  const delegate = { name: "delegate_task", arguments: { bot: "teammate", task: "Summarize the fixture." } };
+  loop.delegateResolver = async (botRef, task, signal, actor) => {
+    assert.equal(botRef, delegate.arguments.bot);
+    assert.equal(task, delegate.arguments.task);
+    assert.equal(signal.aborted, false);
+    assert.deepEqual(actor, { handle, workspaceId: scope.workspaceId, installationId: scope.installationId });
+    await sources.bridge.TauriBridge.verifyWorkspaceDelegate(actor.handle, "target-installation");
+    steps.push("delegate");
+    return { ok: true, botName: "Teammate", modelUsed: "Fixture model", reply: "Fixture summary." };
+  };
+  const { outcome, requests, entries, bridge } = await runFixture(t, [
+    reply("Inspecting the workspace.", read, list), reply("Proposing a write.", fixtureWrite, delegate), finalReply,
+  ], {
+    loop, scope, decisions: [true],
+    native: {
+      startWorkspaceRun: async () => { steps.push("start"); return handle; },
+      endWorkspaceRun: async () => { steps.push("end"); },
+      workspaceReadFile: async () => {
+        steps.push("read");
+        return { content: "Current fixture note.", total_lines: 1, size_bytes: 21 };
+      },
+      workspaceListDirectory: async () => {
+        steps.push("list");
+        return [{ name: "notes.txt", is_dir: false, size: 21 }];
+      },
+      workspaceCreateWriteProposal: async (...args) => {
+        steps.push("propose");
+        return workspaceProposal(...args);
+      },
+      approveProposal: async () => { steps.push("approve"); return true; },
+      workspaceWriteFile: async (_, filePath, content) => {
+        steps.push("write");
+        return { path: filePath, success: true, size_bytes: Buffer.byteLength(content) };
+      },
+      verifyWorkspaceDelegate: async () => { steps.push("verify"); },
+    },
+  });
+
+  assert.equal(outcome, "completed");
+  assert.equal(loop.isBusy(), false);
+  assert.deepEqual(steps, ["start", "read", "list", "propose", "approve", "write", "verify", "delegate", "end"]);
+  assert.deepEqual(callArguments(bridge.startWorkspaceRun), [[scope.workspaceId, scope.installationId]]);
+  assert.deepEqual(callArguments(bridge.endWorkspaceRun), [[handle]]);
+  assert.deepEqual(callArguments(bridge.workspaceReadFile), [[handle, path, 5]]);
+  assert.deepEqual(callArguments(bridge.workspaceListDirectory), [[handle, list.arguments.path]]);
+  assert.deepEqual(callArguments(bridge.workspaceCreateWriteProposal), [[handle, path, fixtureWrite.arguments.content]]);
+  assert.deepEqual(callArguments(bridge.approveProposal), [["write-proposal"]]);
+  assert.deepEqual(callArguments(bridge.workspaceWriteFile), [[handle, path, fixtureWrite.arguments.content, "write-proposal"]]);
+  assert.deepEqual(callArguments(bridge.verifyWorkspaceDelegate), [[handle, "target-installation"]]);
+  for (const { body } of requests) {
+    assert.deepEqual(body.tools.map((tool) => tool.function.name).sort(), [...scope.tools].sort());
+    assert.ok(!JSON.stringify(body).includes(handle), "Run handles are never sent to the provider");
+  }
+  assert.deepEqual(entries.flatMap((entry) => entry.toolCalls.map((tool) => tool.status)), Array(4).fill("completed"));
+});
+
+test("scoped dispatch rejects uninstalled, unknown, and shell tool calls", async (t) => {
+  const denied = [
+    list,
+    shell(),
+    { name: "fixture_unknown_tool", arguments: {} },
+  ];
+  const { outcome, requests, entries, bridge } = await runFixture(t, [reply("Checking.", ...denied), finalReply], {
+    scope: { ...workspaceScope, tools: ["read_file", "execute_shell"] },
+    native: workspaceStubs(),
+  });
+  assert.equal(outcome, "failed");
+  assert.deepEqual(requests[0].body.tools.map((tool) => tool.function.name), ["read_file"]);
+  assert.deepEqual(callArguments(bridge.endWorkspaceRun), [[handle]]);
+  assert.equal(entries[0].toolCalls.length, denied.length);
+  for (const tool of entries[0].toolCalls) {
+    assert.equal(tool.status, "failed");
+    assert.match(tool.result.error, /unavailable/i);
+  }
+  assert.equal(toolResults(requests[1]).length, denied.length);
+});
+
+for (const [description, options] of [
+  ["a chat-only installation", { scope: workspaceScope }],
+  ["a model without tool support", { scope: { ...workspaceScope, tools: ["read_file"] }, supportsTools: false }],
+]) {
+  test(`${description} omits scoped tool definitions and denies unsolicited calls`, async (t) => {
+    const { outcome, requests, entries } = await runFixture(t, [reply("Checking.", read), finalReply], {
+      ...options, native: workspaceStubs(),
+    });
+    assert.equal(outcome, "failed");
+    assert.ok(requests.every(({ body }) => !("tools" in body)));
+    assert.match(entries[0].toolCalls[0].result.error, /unavailable/i);
+  });
+}
+
+for (const [description, modelOverrides] of [
+  ["an ACP provider", { provider: "acp" }],
+  ["a model marked as BYOP", { isByop: true }],
+]) {
+  test(`a scoped turn blocks ${description} before provider or native I/O`, async (t) => {
+    const { outcome, entries } = await runFixture(t, [], { scope: workspaceScope, modelOverrides });
+    assert.equal(outcome, "failed");
+    assert.match(entries[0].content, /CLI agents.*cannot run as workspace bots/i);
+  });
+}
+
+test("a provider failure closes the scoped run", async (t) => {
+  const { outcome, entries, bridge } = await runFixture(t, [new Response("unavailable", { status: 503 })], {
+    scope: workspaceScope, native: workspaceStubs(),
+  });
+  assert.equal(outcome, "failed");
+  assert.match(entries[0].content, /503.*unavailable/i);
+  assert.deepEqual(callArguments(bridge.endWorkspaceRun), [[handle]]);
+});
+
+test("a failed scoped startup neither streams nor falls back to an owner run", async (t) => {
+  const { outcome, entries } = await runFixture(t, [], {
+    scope: workspaceScope,
+    native: { startWorkspaceRun: async () => { throw "Installation is no longer in this workspace."; } },
+  });
+  assert.equal(outcome, "failed");
+  assert.match(entries[0].content, /installation is no longer in this workspace/i);
+});
+
+test("Stop during scoped startup closes the newly opened handle without streaming", async (t) => {
+  const loop = new sources.agent.AgentLoop();
+  const { outcome, bridge } = await runFixture(t, [], {
+    loop, scope: workspaceScope,
+    native: { ...workspaceStubs(), startWorkspaceRun: async () => { assert.ok(loop.abort()); return handle; } },
+  });
+  assert.equal(outcome, "cancelled");
+  assert.deepEqual(callArguments(bridge.endWorkspaceRun), [[handle]]);
+  assert.equal(loop.isBusy(), false);
+});
+
+test("Stop during scoped write approval cancels the proposal, closes once, and never writes", async (t) => {
+  const loop = new sources.agent.AgentLoop();
+  const { outcome, entries, bridge } = await runFixture(t, [reply("Proposing.", fixtureWrite)], {
+    loop,
+    scope: { ...workspaceScope, tools: ["write_file"] },
+    decisions: [() => assert.ok(loop.abort())],
+    native: {
+      ...workspaceStubs(),
+      workspaceCreateWriteProposal: workspaceProposal,
+      cancelProposal: async () => true,
+      recordRejectionAudit: async () => true,
+    },
+  });
+  assert.equal(outcome, "cancelled");
+  assert.equal(entries[0].toolCalls[0].status, "rejected");
+  assert.deepEqual(callArguments(bridge.cancelProposal), [["write-proposal"]]);
+  assert.deepEqual(callArguments(bridge.endWorkspaceRun), [[handle]]);
+  assert.equal(loop.isBusy(), false);
+});
+
+test("native approval failure leaves the reviewed diff but never applies the scoped write", async (t) => {
+  const { outcome, entries, bridge } = await runFixture(t, [reply("Proposing.", fixtureWrite), finalReply], {
+    scope: { ...workspaceScope, tools: ["write_file"] },
+    decisions: [true],
+    native: {
+      ...workspaceStubs(),
+      workspaceCreateWriteProposal: workspaceProposal,
+      approveProposal: async () => false,
+      cancelProposal: async () => true,
+    },
+  });
+  assert.equal(outcome, "failed");
+  const [tool] = entries[0].toolCalls;
+  assert.equal(tool.status, "failed");
+  assert.match(tool.result.error, /could not be approved/i);
+  assert.equal(tool.result.diff.after, fixtureWrite.arguments.content);
+  assert.deepEqual(callArguments(bridge.cancelProposal), [["write-proposal"]]);
+});
+
+test("scoped bridge uses native handle arguments and fails closed outside Tauri", async (t) => {
+  const bridge = sources.bridge.TauriBridge;
+  const { workspaceId, installationId } = workspaceScope;
+  await assert.rejects(bridge.startWorkspaceRun(workspaceId, installationId), /desktop app/i);
+
+  const calls = [];
+  const original = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { __TAURI_INTERNALS__: { invoke: async (command, args) => {
+      calls.push([command, args]);
+      if (command === "start_workspace_run") return handle;
+      if (command === "verify_workspace_delegate") return args.targetInstallationId === "allowed";
+      return true;
+    } } },
+  });
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, "window", original);
+    else delete globalThis.window;
+  });
+
+  assert.equal(await bridge.startWorkspaceRun(workspaceId, installationId), handle);
+  await bridge.workspaceReadFile(handle, path, 5);
+  await bridge.workspaceListDirectory(handle, path);
+  await bridge.workspaceCreateWriteProposal(handle, path, "fixture");
+  await bridge.workspaceWriteFile(handle, path, "fixture", "proposal");
+  await bridge.verifyWorkspaceDelegate(handle, "allowed");
+  await assert.rejects(bridge.verifyWorkspaceDelegate(handle, "denied"), /not allowed/i);
+  await bridge.endWorkspaceRun(handle);
+  assert.deepEqual(calls, [
+    ["start_workspace_run", { workspaceId, installationId }],
+    ["workspace_read_file", { handle, path, maxLines: 5 }],
+    ["workspace_list_directory", { handle, path }],
+    ["workspace_create_write_proposal", { handle, path, content: "fixture" }],
+    ["workspace_write_file", { handle, path, content: "fixture", proposalId: "proposal" }],
+    ["verify_workspace_delegate", { handle, targetInstallationId: "allowed" }],
+    ["verify_workspace_delegate", { handle, targetInstallationId: "denied" }],
+    ["end_workspace_run", { handle }],
+  ]);
+});
+
+test("a scoped turn sends only historical prose, then receives its own tool results", async (t) => {
+  const history = [
+    { role: "user", content: "Earlier fixture question." },
+    {
+      role: "assistant",
+      content: "Earlier fixture answer.",
+      toolCalls: [{
+        id: "historical-tool-id", name: "read_file", status: "completed",
+        arguments: { path: "/earlier/private-input.txt" }, result: { output: "EARLIER_PRIVATE_RESULT" },
+      }],
+    },
+    { role: "assistant", content: "", toolCalls: [{ id: "historical-tool-only", name: "list_directory" }] },
+  ];
+  const { outcome, requests } = await runFixture(t, [reply("Checking.", read), finalReply], {
+    history,
+    scope: { ...workspaceScope, tools: ["read_file"] },
+    native: { ...workspaceStubs(), workspaceReadFile: async () => ({ content: "Active fixture result." }) },
+  });
+  assert.equal(outcome, "completed");
+  for (const { body } of requests) {
+    assert.deepEqual(body.messages.slice(1, 3), [
+      { role: "user", content: "Earlier fixture question." },
+      { role: "assistant", content: "Earlier fixture answer." },
+    ]);
+    assert.doesNotMatch(JSON.stringify(body.messages), /EARLIER_PRIVATE_RESULT|private-input|historical-tool/);
+  }
+  assert.deepEqual(toolResults(requests[0]), []);
+  assert.match(toolResults(requests[1])[0].content, /Active fixture result\./);
+});
+
+test("duplicate provider IDs leave queued tools nonactionable and bind each approval to its own proposal", async (t) => {
+  const providerId = "duplicate-fixture-id";
+  const writes = [fixtureWrite, { ...fixtureWrite, arguments: { ...fixtureWrite.arguments, path: `${path}.other` } }];
+  const sse = (...frames) => new Response(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""));
+  const updates = [];
+  const { outcome, approvals, requests, bridge } = await runFixture(t, [
+    sse({ choices: [{ delta: { tool_calls: writes.map((tool, index) => ({
+      index, id: providerId, function: { name: tool.name, arguments: JSON.stringify(tool.arguments) },
+    })) }, finish_reason: "tool_calls" }] }),
+    sse({ choices: [{ delta: { content: "Done." }, finish_reason: "stop" }] }),
+  ], {
+    modelOverrides: { provider: "openai" },
+    vaultOverrides: { openaiApiKey: "fixture-key" },
+    decisions: [true, true],
+    native: writeStubs(),
+    onUpdate: ({ toolCalls }) => { if (toolCalls.length === 2) updates.push(toolCalls); },
+  });
+  assert.equal(outcome, "completed");
+  assert.ok(updates.some((calls) => calls.every(({ status }) => status === "queued")));
+  assert.ok(updates.some(([first, second]) => first.status === "pending_approval" &&
+    second.status === "queued" && second.proposalId === undefined));
+  assert.notEqual(approvals[0].id, approvals[1].id);
+  assert.deepEqual(approvals.map((tool) => tool.providerCallId), [providerId, providerId]);
+  assert.deepEqual(callArguments(bridge.approveProposal), approvals.map((tool) => [tool.proposalId]));
+  const wireIds = requests[1].body.messages.find((message) => message.tool_calls).tool_calls.map(({ id }) => id);
+  assert.equal(wireIds[0], providerId);
+  assert.notEqual(wireIds[0], wireIds[1]);
+  assert.deepEqual(toolResults(requests[1]).map(({ tool_call_id }) => tool_call_id), wireIds);
+});
+
+test("an Ollama length stop preserves partial text but never emits or runs a tool", async (t) => {
+  const truncated = new Response([
+    { message: { content: "Partial fixture reply.", tool_calls: [{ function: fixtureWrite }] } },
+    { done: true, done_reason: "length" },
+  ].map((frame) => `${JSON.stringify(frame)}\n`).join(""));
+  const updates = [];
+  const { outcome, entries, bridge } = await runFixture(t, [truncated], {
+    scope: { ...workspaceScope, tools: ["write_file"] },
+    native: workspaceStubs(),
+    onUpdate: (entry) => updates.push(entry),
+  });
+  assert.equal(outcome, "failed");
+  assert.match(entries[0].content, /Partial fixture reply\..*done_reason: length/s);
+  assert.ok(updates.every((entry) => entry.toolCalls.length === 0));
+  assert.deepEqual(callArguments(bridge.endWorkspaceRun), [[handle]]);
 });

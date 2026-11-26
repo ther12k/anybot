@@ -1,0 +1,117 @@
+.warm-workspace .workspace-dialog:has(.session-import) {
+  max-width: calc(100% - 24px);
+}
+
+.warm-workspace .session-import {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  color: var(--plum);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.warm-workspace .session-import :is(p, h3) {
+  margin: 0;
+}
+
+.warm-workspace .session-import p {
+  text-wrap: pretty;
+}
+
+.warm-workspace .session-import h3 {
+  font-size: inherit;
+  font-weight: 650;
+  text-wrap: balance;
+}
+
+.warm-workspace .session-import-sources {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.warm-workspace .session-import-sources legend {
+  margin-bottom: 7px;
+  padding: 0;
+  font-weight: 650;
+}
+
+.warm-workspace .session-import-sources p {
+  margin-top: 7px;
+}
+
+.warm-workspace .session-import-source {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+}
+
+.warm-workspace .session-import-source .field {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+.warm-workspace .session-import-source .field label {
+  color: inherit;
+}
+
+.warm-workspace .session-import .field :is(input, select) {
+  max-width: 100%;
+  min-height: 44px;
+  text-overflow: ellipsis;
+}
+
+.warm-workspace .session-import .btn {
+  min-height: 44px;
+}
+
+.warm-workspace .session-import .btn[aria-pressed="true"] {
+  border-color: var(--plum);
+  background: var(--lilac);
+}
+
+.warm-workspace .session-import button[aria-disabled="true"] {
+  cursor: wait;
+  opacity: .6;
+}
+
+.warm-workspace .session-import :is(button, input, select):focus-visible {
+  outline-color: var(--plum);
+}
+
+.warm-workspace .session-import-feedback:empty {
+  position: absolute;
+}
+
+.warm-workspace .session-import-feedback[role="alert"] {
+  color: var(--red);
+  font-weight: 600;
+}
+
+.warm-workspace .session-import-preview {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--panel);
+}
+
+.warm-workspace .session-import-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.warm-workspace .session-import-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.warm-workspace .session-import-footer {
+  justify-content: flex-end;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}

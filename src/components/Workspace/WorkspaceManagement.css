@@ -1,0 +1,139 @@
+.warm-workspace .workspace-management {
+  max-width: calc(100% - 24px);
+  overflow-wrap: anywhere;
+}
+
+.warm-workspace .workspace-management .modal-head .icon-btn {
+  flex-shrink: 0;
+}
+
+.warm-workspace .workspace-management .modal-body {
+  min-height: 0;
+}
+
+.warm-workspace .workspace-management fieldset {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.warm-workspace .workspace-management-section + .workspace-management-section {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding-top: 16px;
+}
+
+.warm-workspace .workspace-management :is(h3, h4, legend) {
+  margin: 0 0 4px;
+  padding: 0;
+  font-weight: 650;
+}
+
+.warm-workspace .workspace-management h3 {
+  font-size: 14px;
+}
+
+.warm-workspace .workspace-management :is(p, .field label, .checkbox-row) {
+  color: var(--plum);
+  font-size: 12px;
+}
+
+.warm-workspace .workspace-management-section p {
+  margin: 0 0 12px;
+}
+
+.warm-workspace .workspace-management .field {
+  margin-bottom: 12px;
+}
+
+.warm-workspace .workspace-management :is(.btn, .field input, .field select, .checkbox-row) {
+  min-height: 40px;
+}
+
+.warm-workspace .workspace-management .field select {
+  text-overflow: ellipsis;
+}
+
+.warm-workspace .workspace-management :is(button, input, select):focus-visible {
+  outline-color: var(--plum);
+}
+
+.warm-workspace .workspace-management-folders {
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.warm-workspace .workspace-management-folders li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.warm-workspace .workspace-management-folders li > div {
+  flex: 1 1 130px;
+  min-width: 0;
+}
+
+.warm-workspace .workspace-management-folders small {
+  display: block;
+  color: var(--plum);
+}
+
+.warm-workspace .workspace-management-bot {
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 12px;
+  background: var(--panel);
+  margin-bottom: 14px;
+}
+
+.warm-workspace .workspace-management-bot .checkbox-row {
+  margin-bottom: 0;
+}
+
+.warm-workspace .workspace-management-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.warm-workspace .workspace-management-confirm {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.warm-workspace .workspace-management-feedback {
+  display: block;
+  flex-shrink: 0;
+  max-height: 28dvh;
+  overflow: auto;
+}
+
+.warm-workspace .workspace-management-feedback:not(.has-feedback) {
+  border: 0;
+  padding-block: 0;
+}
+
+.warm-workspace .workspace-management-feedback p {
+  margin: 0;
+}
+
+.warm-workspace .workspace-management :is(.workspace-management-error, .workspace-management-feedback [role="alert"]) {
+  color: var(--red);
+  font-weight: 600;
+}
+
+.warm-workspace .workspace-management .workspace-management-error {
+  margin: 5px 0 0;
+}
+
+.warm-workspace .workspace-management .workspace-management-error:empty {
+  margin: 0;
+}

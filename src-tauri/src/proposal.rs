@@ -1,11 +1,15 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tauri::WebviewWindow;
+use crate::audit::record_audit_at;
+use crate::policy::audit_path;
 use crate::reviewed_file::ReviewedFile;
+use crate::workspace::{self, Access, RunScope, Tool};
 
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -49,10 +53,11 @@ enum ProposalAction {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Proposal {
     pub id: String,
     pub run_id: Option<String>,
+    scope: Option<RunScope>,
     action: ProposalAction,
     pub status: ProposalStatus,
     pub created_at: u64,
@@ -90,6 +95,56 @@ pub async fn create_write_proposal(
     let requested = PathBuf::from(&path);
     let (reviewed, before) = tokio::task::spawn_blocking(move || ReviewedFile::inspect(&requested))
         .await.map_err(|e| format!("Review worker failed: {e}"))??;
+    register_write(path, content, run_id, None, reviewed, before)
+}
+
+#[tauri::command]
+pub async fn workspace_create_write_proposal(
+    window: WebviewWindow,
+    handle: String,
+    path: String,
+    content: String,
+) -> Result<WriteProposalView, String> {
+    workspace::require_owner_window(&window)?;
+    let registry = workspace::registry_path();
+    let log = audit_path();
+    tokio::task::spawn_blocking(move || workspace_write_proposal_at(&registry, &handle, path, content, &log))
+        .await.map_err(|e| format!("Review worker failed: {e}"))?
+}
+
+pub(crate) fn workspace_write_proposal_at(
+    registry: &Path,
+    handle: &str,
+    path: String,
+    content: String,
+    log: &Path,
+) -> Result<WriteProposalView, String> {
+    let requested = workspace::expand_tilde(&path)?;
+    workspace::with_run_grant(registry, handle, Tool::WriteFile, |scope, grant, _| {
+        let (reviewed, before) = workspace::check_write_content_size(&content)
+            .and_then(|()| {
+                ReviewedFile::inspect_with_scope(&requested, |target| {
+                    grant.check_resolved_path(target, Access::ReadWrite)
+                })
+            })
+            .inspect_err(|error| {
+                let _ = record_audit_at(log, serde_json::json!({
+                    "tool": "write_file", "decision": "proposal_refused", "outcome": "blocked",
+                    "path": path, "error": error, "installation_id": scope.installation_id(),
+                }));
+            })?;
+        register_write(path, content, None, Some(scope.clone()), reviewed, before)
+    })
+}
+
+fn register_write(
+    path: String,
+    content: String,
+    run_id: Option<String>,
+    scope: Option<RunScope>,
+    reviewed: ReviewedFile,
+    before: String,
+) -> Result<WriteProposalView, String> {
     let display_path = reviewed.path().display().to_string();
     let existed = reviewed.existed();
     let content_sha256 = sha256_hex(content.as_bytes());
@@ -103,6 +158,7 @@ pub async fn create_write_proposal(
     let proposal = Proposal {
         id: id.clone(),
         run_id,
+        scope,
         action: ProposalAction::WriteFile { path, content_sha256, reviewed },
         status: ProposalStatus::Pending,
         created_at: now_ms(),
@@ -137,6 +193,7 @@ pub async fn create_shell_proposal(
     let proposal = Proposal {
         id: id.clone(),
         run_id,
+        scope: None,
         action: ProposalAction::ExecuteShell {
             command: command.clone(),
             cwd: cwd.clone(),
@@ -159,7 +216,12 @@ pub async fn create_shell_proposal(
 
 /// User explicitly approves the proposal. Only Pending proposals can be approved.
 #[tauri::command]
-pub fn approve_proposal(proposal_id: String) -> Result<bool, String> {
+pub fn approve_proposal(window: WebviewWindow, proposal_id: String) -> Result<bool, String> {
+    workspace::require_owner_window(&window)?;
+    approve_proposal_by_id(proposal_id)
+}
+
+pub(crate) fn approve_proposal_by_id(proposal_id: String) -> Result<bool, String> {
     let mut map = PROPOSALS.lock().map_err(|e| e.to_string())?;
     let prop = map.get_mut(&proposal_id).ok_or_else(|| "Proposal not found".to_string())?;
     if prop.status != ProposalStatus::Pending {
@@ -171,7 +233,12 @@ pub fn approve_proposal(proposal_id: String) -> Result<bool, String> {
 
 /// User explicitly declines/rejects the proposal. Only Pending proposals can be rejected.
 #[tauri::command]
-pub fn reject_proposal(proposal_id: String) -> Result<bool, String> {
+pub fn reject_proposal(window: WebviewWindow, proposal_id: String) -> Result<bool, String> {
+    workspace::require_owner_window(&window)?;
+    reject_proposal_by_id(proposal_id)
+}
+
+pub(crate) fn reject_proposal_by_id(proposal_id: String) -> Result<bool, String> {
     let mut map = PROPOSALS.lock().map_err(|e| e.to_string())?;
     let prop = map.get_mut(&proposal_id).ok_or_else(|| "Proposal not found".to_string())?;
     if prop.status != ProposalStatus::Pending {
@@ -183,7 +250,12 @@ pub fn reject_proposal(proposal_id: String) -> Result<bool, String> {
 
 /// Cancel proposal (e.g. on Stop or task abort).
 #[tauri::command]
-pub fn cancel_proposal(proposal_id: String) -> Result<bool, String> {
+pub fn cancel_proposal(window: WebviewWindow, proposal_id: String) -> Result<bool, String> {
+    workspace::require_owner_window(&window)?;
+    cancel_proposal_by_id(proposal_id)
+}
+
+pub(crate) fn cancel_proposal_by_id(proposal_id: String) -> Result<bool, String> {
     let mut map = PROPOSALS.lock().map_err(|e| e.to_string())?;
     if let Some(prop) = map.get_mut(&proposal_id) {
         prop.status = ProposalStatus::Cancelled;
@@ -192,17 +264,36 @@ pub fn cancel_proposal(proposal_id: String) -> Result<bool, String> {
     Ok(false)
 }
 
+/// Called while ending a run, with the run registry locked. Neither pending
+/// proposals nor approved tokens survive the lifetime of their native handle.
+pub(crate) fn forget_run(scope: &RunScope) -> Result<(), String> {
+    PROPOSALS.lock().map_err(|_| "Cannot access proposals.")?
+        .retain(|_, proposal| proposal.scope.as_ref() != Some(scope));
+    Ok(())
+}
+
+fn require_scope(proposal: &Proposal, scope: Option<&RunScope>) -> Result<(), String> {
+    if proposal.scope.as_ref() == scope {
+        Ok(())
+    } else {
+        Err("Blocked: this proposal belongs to a different run or tool namespace.".into())
+    }
+}
+
 /// Consume authorization, then hand the native snapshot to the writer for
 /// the disk conflict check after staging. Failed writes need a fresh review.
 pub(crate) fn consume_write_proposal(
     proposal_id: &str,
     path: &str,
     content: &str,
+    scope: Option<&RunScope>,
 ) -> Result<ReviewedFile, String> {
     let mut map = PROPOSALS.lock().map_err(|e| e.to_string())?;
     let prop = map.get_mut(proposal_id).ok_or_else(|| {
         "Blocked: proposal token not found in native registry.".to_string()
     })?;
+
+    require_scope(prop, scope)?;
 
     if prop.status != ProposalStatus::Approved {
         return Err(format!(
@@ -238,6 +329,8 @@ pub fn consume_shell_proposal(
     let prop = map.get_mut(proposal_id).ok_or_else(|| {
         "Blocked: proposal token not found in native registry.".to_string()
     })?;
+
+    require_scope(prop, None)?;
 
     if prop.status != ProposalStatus::Approved {
         return Err(format!(
@@ -286,27 +379,27 @@ mod tests {
         assert_eq!(prop.status, ProposalStatus::Pending);
 
         // Cannot consume before approval
-        let err = consume_write_proposal(&prop.id, &path_str, "hello world").unwrap_err();
+        let err = consume_write_proposal(&prop.id, &path_str, "hello world", None).unwrap_err();
         assert!(err.contains("not in Approved status"));
 
         // Approve
-        assert!(approve_proposal(prop.id.clone()).unwrap());
+        assert!(approve_proposal_by_id(prop.id.clone()).unwrap());
 
         // Tampered content cannot be consumed
-        let err = consume_write_proposal(&prop.id, &path_str, "tampered content").unwrap_err();
+        let err = consume_write_proposal(&prop.id, &path_str, "tampered content", None).unwrap_err();
         assert!(err.contains("content does not match"));
 
         // Re-create proposal for valid consume
         let prop2 = create_write_proposal(path_str.clone(), "hello world".to_string(), None)
             .await
             .unwrap();
-        approve_proposal(prop2.id.clone()).unwrap();
+        approve_proposal_by_id(prop2.id.clone()).unwrap();
 
         // Valid consume succeeds
-        assert!(consume_write_proposal(&prop2.id, &path_str, "hello world").is_ok());
+        assert!(consume_write_proposal(&prop2.id, &path_str, "hello world", None).is_ok());
 
         // Single-use: second consume fails
-        let err = consume_write_proposal(&prop2.id, &path_str, "hello world").unwrap_err();
+        let err = consume_write_proposal(&prop2.id, &path_str, "hello world", None).unwrap_err();
         assert!(err.contains("not in Approved status"));
 
         // Disk conflicts are checked by the writer rather than by the registry.
@@ -323,14 +416,14 @@ mod tests {
         assert!(consume_shell_proposal(&prop.id, "npm install", Some("/tmp")).is_err());
 
         // Approve
-        approve_proposal(prop.id.clone()).unwrap();
+        approve_proposal_by_id(prop.id.clone()).unwrap();
 
         // Cwd or cmd mismatch fails
         assert!(consume_shell_proposal(&prop.id, "npm install", Some("/var")).is_err());
 
         // Re-create and consume
         let prop2 = create_shell_proposal("npm test".to_string(), None, None).await.unwrap();
-        approve_proposal(prop2.id.clone()).unwrap();
+        approve_proposal_by_id(prop2.id.clone()).unwrap();
         assert!(consume_shell_proposal(&prop2.id, "npm test", None).is_ok());
 
         // Cannot re-use

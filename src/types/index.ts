@@ -1,4 +1,5 @@
 export type Role = "user" | "assistant" | "system" | "tool";
+export type SessionImportSource = "zcode" | "claude";
 
 export type AIProvider = "anthropic" | "openai" | "ollama" | "grok" | "acp";
 
@@ -38,9 +39,11 @@ export interface CommandSafetyResult {
 
 export interface ToolCallItem {
   id: string;
+  /** Correlates the result on the provider wire, never in the approval UI. */
+  providerCallId?: string;
   name: "execute_shell" | "read_file" | "write_file" | "list_directory" | "delegate_task";
   arguments: Record<string, any>;
-  status: "pending_approval" | "running" | "completed" | "failed" | "rejected";
+  status: "queued" | "pending_approval" | "running" | "completed" | "failed" | "rejected";
   safetyTier?: CommandSafetyTier;
   safetyReason?: string;
   /** Immutable native proposal token issued by the Rust backend. */
@@ -64,6 +67,8 @@ export interface TranscriptEntry {
   content: string;
   /** Persona that authored this assistant entry (Team Rooms attribution). */
   authorBotId?: string;
+  authorInstallationId?: string;
+  importedFrom?: SessionImportSource;
   thinking?: string;
   isThinkingActive?: boolean;
   thinkingDurationMs?: number;
@@ -128,6 +133,12 @@ export interface Thread {
   /** Room members (personas). `botId` remains the room's PRIMARY bot —
    *  the default addressee for messages without an @mention. */
   participantBotIds?: string[];
+  /** Desktop scope; persona ids above are retained for historical labels. */
+  workspaceId?: string;
+  installationId?: string;
+  participantInstallationIds?: string[];
+  /** Imported snapshots are read-only. Continuing creates a new thread. */
+  importedFrom?: SessionImportSource;
   /** Resume point for a workflow waiting on a human event in this thread. */
   pendingWorkflow?: { workflowId: string; nextStep: number; kind?: WorkflowGate["kind"] };
 }

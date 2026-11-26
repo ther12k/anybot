@@ -25,6 +25,8 @@ export interface StreamOptions {
    *  CLI requests are rejected in that mode because the CLI manages its own
    *  tools. Defaults to true. */
   includeTools?: boolean;
+  /** Workspace allowlist. An empty set is chat-only, not unrestricted. */
+  allowedTools?: ReadonlySet<string>;
 }
 
 /**
@@ -72,21 +74,29 @@ export async function streamChatCompletion(
   opts?: StreamOptions
 ): Promise<void> {
   const includeTools = opts?.includeTools !== false;
-  if (!includeTools && isCliModel(model)) {
-    const error = new Error("Tool-less delegation is not supported for CLI agents. Choose a configured API or Ollama model instead.");
+  const allowedTools = opts?.allowedTools;
+  if (isCliModel(model) && (allowedTools || !includeTools)) {
+    const error = new Error(allowedTools
+      ? "CLI agents manage their own tools and cannot run as workspace bots. Choose a configured API or Ollama model instead."
+      : "Tool-less delegation is not supported for CLI agents. Choose a configured API or Ollama model instead.");
     callbacks.onError?.(error);
     throw error;
   }
+  const selectTools = <T>(tools: T[], getName: (tool: T) => string): T[] => {
+    if (!includeTools || (allowedTools && !model.supportsTools)) return [];
+    return allowedTools ? tools.filter((tool) => allowedTools.has(getName(tool))) : tools;
+  };
   try {
     if (model.provider === "acp") {
       await streamAcpAgent(model, messages, systemPrompt, callbacks, signal);
     } else if (model.provider === "anthropic") {
-      await streamAnthropic(model, vault, messages, systemPrompt, callbacks, signal, temperature, includeTools);
-    } else if (model.provider === "ollama") {
-      await streamOllama(model, vault, messages, systemPrompt, callbacks, signal, temperature, includeTools);
+      const tools = selectTools(ANTHROPIC_TOOLS, (tool) => tool.name);
+      await streamAnthropic(model, vault, messages, systemPrompt, callbacks, signal, temperature, tools);
     } else {
-      // OpenAI or Grok (xAI uses OpenAI-compatible API format)
-      await streamOpenAI(model, vault, messages, systemPrompt, callbacks, signal, temperature, includeTools);
+      // OpenAI and Grok share the tool schema with Ollama.
+      const tools = selectTools(OPENAI_TOOLS, (tool) => tool.function.name);
+      const stream = model.provider === "ollama" ? streamOllama : streamOpenAI;
+      await stream(model, vault, messages, systemPrompt, callbacks, signal, temperature, tools);
     }
   } catch (err: any) {
     if (signal?.aborted) return;
@@ -116,7 +126,7 @@ async function streamAnthropic(
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
   temperature?: number,
-  includeTools = true
+  tools: typeof ANTHROPIC_TOOLS = []
 ) {
   const apiKey = vault.anthropicApiKey?.trim();
   if (!apiKey) {
@@ -177,8 +187,8 @@ async function streamAnthropic(
     messages: anthropicMessages,
     stream: true,
   };
-  if (includeTools) {
-    payload.tools = ANTHROPIC_TOOLS;
+  if (tools.length) {
+    payload.tools = tools;
   }
 
   if (model.supportsThinking) {
@@ -299,7 +309,7 @@ async function streamAnthropic(
               id: currentToolCall.id,
               name: currentToolCall.name,
               arguments: args,
-              status: "pending_approval",
+              status: "queued",
             });
             currentToolCall = null;
           }
@@ -312,7 +322,7 @@ async function streamAnthropic(
 
   // EOF without message_stop = the response never finished. Fail loudly so
   // the partial text is kept but its tool calls are not executed (the agent
-  // loop rejects any pending_approval calls from an errored turn).
+  // loop rejects queued calls from an errored turn).
   if (!sawMessageStop) {
     throw new Error(
       "The response stream ended before the model finished (no completion event). The partial answer above may be incomplete — send again to continue."
@@ -345,7 +355,7 @@ async function streamOpenAI(
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
   temperature?: number,
-  includeTools = true
+  tools: typeof OPENAI_TOOLS = []
 ) {
   const isGrok = model.provider === "grok";
   // Each provider only ever gets its own credential — never fall back to
@@ -386,8 +396,8 @@ async function streamOpenAI(
     messages: formattedMessages,
     stream: true,
   };
-  if (includeTools) {
-    payload.tools = OPENAI_TOOLS;
+  if (tools.length) {
+    payload.tools = tools;
   }
   if (typeof temperature === "number") {
     payload.temperature = temperature;
@@ -525,7 +535,7 @@ async function streamOpenAI(
       id: tc.id,
       name: tc.name as any,
       arguments: args,
-      status: "pending_approval",
+      status: "queued",
     });
   }
 
@@ -541,7 +551,7 @@ async function streamOllama(
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
   temperature?: number,
-  includeTools = true
+  tools: typeof OPENAI_TOOLS = []
 ) {
   const baseUrl = (vault.ollamaBaseUrl?.trim() || "http://localhost:11434").replace(/\/$/, "");
 
@@ -583,8 +593,8 @@ async function streamOllama(
     messages: formattedMessages,
     stream: true,
   };
-  if (model.supportsTools && includeTools) {
-    payload.tools = OPENAI_TOOLS;
+  if (model.supportsTools && tools.length) {
+    payload.tools = tools;
   }
   if (typeof temperature === "number") {
     payload.options = { ...(payload.options as object | undefined), temperature };
@@ -611,8 +621,11 @@ async function streamOllama(
   let buffer = "";
   let insideThinkTag = false;
   // Ollama's contract: the final NDJSON line carries done=true. A closed
-  // body without it is an interrupted stream.
+  // body without it is an interrupted stream. Completion must also not be
+  // a truncation before this stream can emit any tool requests.
   let sawDone = false;
+  let truncated = false;
+  const toolCalls: ToolCallItem[] = [];
 
   while (true) {
     const { done, value } = await readWithWatchdog(() => reader.read(), signal);
@@ -639,6 +652,7 @@ async function streamOllama(
       }
       if (parsed.done === true) {
         sawDone = true;
+        truncated ||= parsed.done_reason === "length";
       }
 
       try {
@@ -673,11 +687,11 @@ async function streamOllama(
 
         if (msg.tool_calls) {
           for (const tc of msg.tool_calls) {
-            callbacks.onToolCall?.({
+            toolCalls.push({
               id: `ollama_call_${Date.now()}_${Math.random().toString(36).substring(7)}`,
               name: tc.function?.name,
               arguments: tc.function?.arguments || {},
-              status: "pending_approval",
+              status: "queued",
             });
           }
         }
@@ -692,7 +706,13 @@ async function streamOllama(
       "The response stream ended before the model finished (no done marker). The partial answer above may be incomplete — send again to continue."
     );
   }
+  if (truncated) {
+    throw new Error(
+      "The model stopped early (done_reason: length); the answer may be incomplete and no tool actions were run. Try again or narrow the request."
+    );
+  }
 
+  for (const toolCall of toolCalls) callbacks.onToolCall?.(toolCall);
   callbacks.onFinished?.();
 }
 

@@ -9,7 +9,7 @@ use tokio::sync::Barrier;
 use super::{read_file_with_audit, write_file_with_audit};
 use crate::audit::{AUDIT_GENESIS, AuditStatus, has_audit_recording_failure, verify_audit_file};
 use crate::models::FileWriteResult;
-use crate::proposal::{ProposalStatus, WriteProposalView, approve_proposal, create_write_proposal};
+use crate::proposal::{ProposalStatus, WriteProposalView, approve_proposal_by_id as approve_proposal, create_write_proposal};
 
 struct Fixture {
     _temp: TempDir,
