@@ -183,7 +183,55 @@ async function safeInvoke<T>(cmd: string, args: Record<string, any> = {}): Promi
   return null as unknown as T;
 }
 
+type FileReadResult = { content: string; total_lines: number; size_bytes: number };
+type FileWriteResult = { path: string; success: boolean; size_bytes: number };
+type DirectoryEntry = { name: string; path: string; is_dir: boolean; is_file: boolean; size: number };
+type WriteProposal = {
+  id: string;
+  path: string;
+  before: string;
+  after: string;
+  existed: boolean;
+  status: string;
+};
+
+async function invokeWorkspaceTool<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
+  // Scoped actions require native authorization; the owner/browser mock is
+  // not an alternative when a workspace run cannot be opened.
+  if (!isTauriEnvironment()) throw new Error("Workspace bot runs are available in the desktop app.");
+  return safeInvoke<T>(cmd, args);
+}
+
 export const TauriBridge = {
+  startWorkspaceRun: async (workspaceId: string, installationId: string): Promise<string> => {
+    return invokeWorkspaceTool("start_workspace_run", { workspaceId, installationId });
+  },
+
+  endWorkspaceRun: async (handle: string): Promise<void> => {
+    await invokeWorkspaceTool("end_workspace_run", { handle });
+  },
+
+  workspaceReadFile: async (handle: string, path: string, maxLines?: number): Promise<FileReadResult> => {
+    return invokeWorkspaceTool("workspace_read_file", { handle, path, maxLines });
+  },
+
+  workspaceListDirectory: async (handle: string, path: string): Promise<DirectoryEntry[]> => {
+    return invokeWorkspaceTool("workspace_list_directory", { handle, path });
+  },
+
+  workspaceCreateWriteProposal: async (handle: string, path: string, content: string): Promise<WriteProposal> => {
+    return invokeWorkspaceTool("workspace_create_write_proposal", { handle, path, content });
+  },
+
+  workspaceWriteFile: async (handle: string, path: string, content: string, proposalId: string): Promise<FileWriteResult> => {
+    return invokeWorkspaceTool("workspace_write_file", { handle, path, content, proposalId });
+  },
+
+  verifyWorkspaceDelegate: async (handle: string, targetInstallationId: string): Promise<void> => {
+    const verified = await invokeWorkspaceTool<boolean>("verify_workspace_delegate", { handle, targetInstallationId });
+    if (verified !== true) throw new Error("Delegation is not allowed in this workspace.");
+  },
+
   checkShellSafety: async (command: string, cwd?: string): Promise<CommandSafetyResult> => {
     return safeInvoke<CommandSafetyResult>("check_shell_safety", { command, cwd });
   },
@@ -222,14 +270,7 @@ export const TauriBridge = {
     path: string,
     content: string,
     runId?: string
-  ): Promise<{
-    id: string;
-    path: string;
-    before: string;
-    after: string;
-    existed: boolean;
-    status: string;
-  }> => {
+  ): Promise<WriteProposal> => {
     return safeInvoke("create_write_proposal", { path, content, runId });
   },
 
@@ -315,7 +356,7 @@ export const TauriBridge = {
   readFileContent: async (
     path: string,
     maxLines?: number
-  ): Promise<{ content: string; total_lines: number; size_bytes: number }> => {
+  ): Promise<FileReadResult> => {
     return safeInvoke("read_file_content", { path, maxLines });
   },
 
@@ -324,13 +365,13 @@ export const TauriBridge = {
     content: string,
     decision?: string,
     proposalId?: string
-  ): Promise<{ path: string; success: boolean; size_bytes: number }> => {
+  ): Promise<FileWriteResult> => {
     return safeInvoke("write_file_content", { path, content, decision, proposalId });
   },
 
   listDirEntries: async (
     path: string
-  ): Promise<Array<{ name: string; path: string; is_dir: boolean; is_file: boolean; size: number }>> => {
+  ): Promise<DirectoryEntry[]> => {
     return safeInvoke("list_dir_entries", { path });
   },
 

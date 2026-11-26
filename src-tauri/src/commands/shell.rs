@@ -376,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn kill_stops_long_running_command() {
-        use crate::proposal::{approve_proposal, create_shell_proposal};
+        use crate::proposal::{approve_proposal_by_id as approve_proposal, create_shell_proposal};
         let prop = create_shell_proposal("sleep 30".into(), None, None)
             .await
             .unwrap();
@@ -426,7 +426,7 @@ mod tests {
         // The old code returned the timeout error while `sleep 30` kept
         // running. The executor must kill the group before reporting.
         let start = Instant::now();
-        use crate::proposal::{approve_proposal, create_shell_proposal};
+        use crate::proposal::{approve_proposal_by_id as approve_proposal, create_shell_proposal};
         let prop = create_shell_proposal("sleep 30".into(), None, None)
             .await
             .unwrap();
@@ -474,7 +474,7 @@ mod tests {
 
     #[tokio::test]
     async fn approved_proposal_token_allows_mutative_command() {
-        use crate::proposal::{create_shell_proposal, approve_proposal};
+        use crate::proposal::{create_shell_proposal, approve_proposal_by_id as approve_proposal};
         let prop = create_shell_proposal("touch /tmp/anybot-prop-test-ok".into(), None, None)
             .await
             .unwrap();

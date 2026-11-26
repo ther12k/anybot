@@ -31,6 +31,7 @@ const TOOL_META = {
 };
 
 const STATUS_META = {
+  queued: { label: "Queued", color: "neutral", Icon: null },
   pending_approval: { label: "Needs approval", color: "amber", Icon: LockKeyhole },
   running: { label: "Running", color: "purple", Icon: null },
   completed: { label: "Done", color: "green", Icon: Check },
@@ -78,9 +79,12 @@ export const ToolCard: React.FC<ToolCardProps> = ({
   useEffect(() => {
     if (requestOpen) feedbackInput.current?.focus();
   }, [requestOpen]);
-  const { id, name, status, arguments: args, result, proposalId, safetyReason, safetyTier } = toolCall;
-  const { label: toolLabel, Icon: ToolIcon } = TOOL_META[name] ?? { label: name, Icon: Terminal };
-  const { label: statusLabel, color, Icon: StatusIcon } = STATUS_META[status];
+  const { id, name, status, result, proposalId, safetyReason, safetyTier } = toolCall;
+  const args = toolCall.arguments ?? {};
+  const { label: toolLabel, Icon: ToolIcon } = Object.prototype.hasOwnProperty.call(TOOL_META, name)
+    ? TOOL_META[name] : { label: name, Icon: Terminal };
+  const { label: statusLabel, color, Icon: StatusIcon } = Object.prototype.hasOwnProperty.call(STATUS_META, status)
+    ? STATUS_META[status] : STATUS_META.failed;
   const pending = status === "pending_approval";
   const file = name === "write_file";
   const shell = name === "execute_shell";

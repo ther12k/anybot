@@ -8,8 +8,8 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { AVAILABLE_MODELS, isCliModel } from "../../services/ai/models";
 import { isTauriEnvironment, TauriBridge, type AuditVerification } from "../../services/tauri/bridge";
-import { modelCanRunWorkflow } from "../../services/workflow";
 import type { AIModel, BotCategory, BotPersona, BotWorkflow, Thread } from "../../types";
+import type { WorkspaceResource } from "../../types/workspace";
 import AnyBotCharacter from "../Tavi/AnyBotCharacter";
 import { AuditReport, auditRequestError } from "./AuditReport";
 import "./WorkspacePages.css";
@@ -19,11 +19,12 @@ export interface WorkspacePagesProps {
   bots: BotPersona[];
   workflows: BotWorkflow[];
   rooms: Thread[];
-  cwd: string;
-  homeDir?: string;
+  resources: WorkspaceResource[];
   model?: AIModel;
   activeBot?: BotPersona;
   busy?: boolean;
+  canRunWorkflow: (workflow: BotWorkflow, model: AIModel) => boolean;
+  onManageWorkspaces?: () => void;
   auditRecordingFailed: boolean;
   onChooseModel?: () => void;
   onNewRoom: () => void;
@@ -186,10 +187,10 @@ function RoomsPage({ rooms, onNewRoom, onSelectRoom }: WorkspacePagesProps) {
   );
 }
 
-function WorkflowsPage({ workflows, activeBot, model, busy, onChooseModel, onRunWorkflow }: WorkspacePagesProps) {
+function WorkflowsPage({ workflows, activeBot, model, busy, canRunWorkflow, onChooseModel, onRunWorkflow }: WorkspacePagesProps) {
   const [detailId, setDetailId] = useState<string | null>(null);
   const detail = workflows.find(({ id }) => id === detailId);
-  const cannotRun = (workflow: BotWorkflow) => !model || busy || !modelCanRunWorkflow(workflow, model);
+  const cannotRun = (workflow: BotWorkflow) => !model || busy || !canRunWorkflow(workflow, model);
   const run = (workflow: BotWorkflow) => {
     if (cannotRun(workflow)) return;
     setDetailId(null);
@@ -239,9 +240,10 @@ function WorkflowsPage({ workflows, activeBot, model, busy, onChooseModel, onRun
         <InfoBanner icon={model?.supportsTools && !isCliModel(model) ? ShieldCheck : Info} className="workspace-after-content">
           {busy ? "Wait for the current run to finish before starting another workflow."
             : !model ? "Choose a model before starting a workflow."
-            : isCliModel(model) ? "This CLI manages its own tools. Choose an API or Ollama model for workflows with AnyBot tool reviews or plan approval."
+            : isCliModel(model) ? "Choose an API or Ollama model for workspace workflows."
+            : !activeBot ? "Install an agent in this workspace before running a workflow."
             : !model.supportsTools ? "Your selected model is chat-only. Workflows that need tools are disabled."
-            : "Workflows use the current agent and model. AnyBot tool reviews and workflow checkpoints pause the run for you."}
+            : "Workflows use the current agent and model. Workflows that need unavailable tools are disabled."}
         </InfoBanner>
         <div className="section-heading"><h2>Recent runs</h2></div>
         <InfoBanner>Workflow history is not saved separately. Open Chats to review the conversation where a workflow ran.</InfoBanner>
@@ -345,48 +347,55 @@ type LoadState<T> = { status: "idle" | "loading" | "error" } | { status: "ready"
 const MAX_FILE_SIZE = 256 * 1024;
 const MAX_FILE_LINES = 400;
 const normalizePath = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "");
-const protectedNames = /^(?:audit\.jsonl|config\.json|policy\.json|standing-grants\.json|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?)$|(?:^|[._-])(?:credentials?|secrets?|tokens?|passwords?|private[-_]?keys?)(?:[._-]|$)|\.(?:pem|key|pfx|p12|jks|keystore)$/i;
-
-function workspaceRoot(cwd: string, homeDir?: string) {
-  const normalized = normalizePath(cwd);
-  if (!/^(?:\/(?!\/)|[A-Za-z]:\/)/.test(normalized) || /\/\.|\0/.test(normalized)) return null;
-  if (normalized.toLowerCase() === normalizePath(homeDir ?? "").toLowerCase()) return null;
-  return normalized;
-}
+const protectedNames = /^(?:audit\.jsonl|config\.json|policy\.json|standing-grants\.json|workspaces\.json|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?)$|(?:^|[._-])(?:credentials?|secrets?|tokens?|passwords?|private[-_]?keys?)(?:[._-]|$)|\.(?:pem|key|pfx|p12|jks|keystore)$/i;
 
 function isVisibleFile(root: string, entry: FileEntry) {
   return entry.is_file && !entry.is_dir && !entry.name.startsWith(".") && !/[\/\\:]/.test(entry.name) &&
     !protectedNames.test(entry.name) && normalizePath(entry.path) === `${root}/${entry.name}`;
 }
 
-function FilesPage({ cwd, homeDir }: Pick<WorkspacePagesProps, "cwd" | "homeDir">) {
-  const root = workspaceRoot(cwd, homeDir);
-  const canRead = isTauriEnvironment() && !!root;
-  const workspace = root?.split("/").pop() ?? "Workspace";
+function WorkspaceFiles({ resources, onManageWorkspaces }: Pick<WorkspacePagesProps, "resources" | "onManageWorkspaces">) {
+  const [folderId, setFolderId] = useState("");
+  const pickerId = useId();
+  const folder = resources.find((item) => item.id === folderId) ?? resources[0];
+  return <FilesPage key={folder?.id ?? "none"} folder={folder?.path} onManageWorkspaces={onManageWorkspaces} picker={resources.length > 0 && (
+    <div className="field workspace-before-content">
+      <label htmlFor={pickerId}>Workspace folder</label>
+      <select id={pickerId} value={folder?.id} onChange={(event) => setFolderId(event.target.value)}>
+        {resources.map((item) => <option key={item.id} value={item.id}>{item.path}</option>)}
+      </select>
+    </div>
+  )} />;
+}
+
+function FilesPage({ folder, picker, onManageWorkspaces }: { folder?: string; picker: ReactNode; onManageWorkspaces?: () => void }) {
+  const root = folder ? normalizePath(folder) : null;
+  const canRead = isTauriEnvironment() && !!folder;
+  const workspace = root?.split("/").pop() || root || "Workspace";
   const [list, setList] = useState<LoadState<FileEntry[]>>({ status: "idle" });
   const [selected, setSelected] = useState<FileEntry | null>(null);
   const [preview, setPreview] = useState<LoadState<FilePreview>>({ status: "idle" });
   const [revision, refresh] = useState(0);
 
   useEffect(() => {
-    if (!canRead || !root) return;
+    if (!canRead || root === null || !folder) return;
     let current = true;
     setList({ status: "loading" });
     // Do not start an audited native read for a superseded render.
     queueMicrotask(async () => {
       if (!current) return;
       try {
-        const entries = await TauriBridge.listDirEntries(cwd);
+        const entries = await TauriBridge.listDirEntries(folder);
         if (current) setList({ status: "ready", data: entries.filter((entry) => isVisibleFile(root, entry)) });
       } catch {
         if (current) setList({ status: "error" });
       }
     });
     return () => { current = false; };
-  }, [canRead, cwd, root, revision]);
+  }, [canRead, folder, root, revision]);
 
   useEffect(() => {
-    if (!canRead || !root || !selected || !isVisibleFile(root, selected) || selected.size > MAX_FILE_SIZE) return;
+    if (!canRead || root === null || !selected || !isVisibleFile(root, selected) || selected.size > MAX_FILE_SIZE) return;
     let current = true;
     TauriBridge.readFileContent(selected.path, MAX_FILE_LINES).then(
       (data) => { if (current) setPreview({ status: "ready", data }); },
@@ -398,14 +407,15 @@ function FilesPage({ cwd, homeDir }: Pick<WorkspacePagesProps, "cwd" | "homeDir"
   return (
     <section className="page workspace-secondary">
       <PageHeader eyebrow="Your project, in context" title="A place for the details."
-        description="Explore text files in the current workspace without editing them."
-        action={<Tag color="purple" icon={ShieldCheck}>Read-only preview</Tag>} />
+        description="Preview text files in folders granted to this workspace."
+        action={onManageWorkspaces && <Action icon={Folder} onClick={onManageWorkspaces}>Manage folders</Action>} />
       <div className="page-body">
         <InfoBanner icon={Folder} className="workspace-before-content">
           {!isTauriEnvironment() ? "File previews are available in the AnyBot desktop app."
-            : !root ? "No project folder is available to preview."
-            : "Only files at the top of this workspace are listed. Hidden and common credential files are omitted."}
+            : !folder ? "Add a folder grant to preview files in this workspace."
+            : "Only files at the top of the selected folder are listed. Hidden and common credential files are omitted."}
         </InfoBanner>
+        {picker}
         <div className="files-layout">
           <aside className="file-tree" aria-label="Workspace files">
             <div className="file-tree-label flex gap-6"><Folder className="icon sm" aria-hidden="true" /><span className="truncate" title={root ?? undefined}>{workspace}</span></div>
@@ -502,7 +512,7 @@ export default function WorkspacePages(props: WorkspacePagesProps) {
     case "rooms": return <RoomsPage {...props} />;
     case "workflows": return <WorkflowsPage {...props} />;
     case "agents": return <AgentsPage {...props} />;
-    case "files": return <FilesPage key={`${props.cwd}\0${props.homeDir ?? ""}`} cwd={props.cwd} homeDir={props.homeDir} />;
+    case "files": return <WorkspaceFiles resources={props.resources} onManageWorkspaces={props.onManageWorkspaces} />;
     case "audit": return <AuditPage recordingFailed={props.auditRecordingFailed} />;
   }
 }

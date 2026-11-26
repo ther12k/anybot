@@ -7,9 +7,10 @@
   --radius:16px; --sidebar:210px; --rail:260px; --inspector:318px;
 }
 .warm-workspace *{box-sizing:border-box}
-.warm-workspace .room-info.workflow-pause{margin:0 clamp(8px,3vw,26px) 8px;flex-wrap:wrap;flex-shrink:0;color:var(--plum)}
-.warm-workspace .workflow-pause>span{min-width:min(100%,180px)}
+.warm-workspace .room-info.workflow-pause,.warm-workspace .room-info.workspace-notice{margin:0 clamp(8px,3vw,26px) 8px;flex-wrap:wrap;flex-shrink:0;color:var(--plum);overflow-wrap:anywhere}
+.warm-workspace .workflow-pause>span,.warm-workspace .workspace-notice>span{min-width:min(100%,180px)}
 .warm-workspace .workflow-actions{display:flex;flex-wrap:wrap;gap:6px}
+.warm-workspace .rail-import{margin:6px 12px;min-height:40px;justify-content:center;flex-shrink:0}
 .warm-workspace{margin:0;background:var(--paper);color:var(--ink);font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;letter-spacing:-.12px;overflow:hidden}
 .warm-workspace button,.warm-workspace input,.warm-workspace textarea,.warm-workspace select{font:inherit;color:inherit}
 .warm-workspace button{cursor:pointer;border:0;background:none}

@@ -5,8 +5,28 @@ import {
   VaultConfig,
   ToolCallItem,
 } from "../../types";
+import type { WorkspaceTool } from "../../types/workspace";
+import { isCliModel } from "../ai/models";
 import { streamChatCompletion, ChatMessagePayload } from "../ai/streamClient";
 import { TauriBridge } from "../tauri/bridge";
+
+export interface WorkspaceRunScope {
+  workspaceId: string;
+  installationId: string;
+  tools: readonly WorkspaceTool[];
+  /** Native authorization resolves paths; the caller's cwd is not forwarded. */
+  cwd?: string;
+}
+
+export interface WorkspaceDelegationScope {
+  readonly handle: string;
+  readonly workspaceId: string;
+  readonly installationId: string;
+}
+
+// Only tools backed by scoped IPC are eligible. Shell/CLI processes can
+// access the machine independently of AnyBot's workspace permissions.
+const SCOPED_TOOLS: readonly WorkspaceTool[] = ["read_file", "list_directory", "write_file", "delegate_task"];
 
 /**
  * Everything that belongs to ONE run: its cancellation controller, its
@@ -29,6 +49,14 @@ interface RunContext {
   failedActions: Map<string, { round: number; callIds: string[] }>;
   /** Declined, blocked or unsupported actions cannot be recovered by a retry. */
   hasBlockedAction: boolean;
+  workspace?: {
+    workspaceId: string;
+    installationId: string;
+    allowedTools: ReadonlySet<WorkspaceTool>;
+    historicalEntryCount: number;
+    actor?: WorkspaceDelegationScope;
+    closing?: Promise<void>;
+  };
 }
 
 /** Honest terminal outcome of a whole run chain. */
@@ -89,12 +117,19 @@ function recordToolOutcome(run: RunContext, tool: ToolCallItem, round: number) {
 export class AgentLoop {
   private activeRun: RunContext | null = null;
 
-  /** Bot-to-bot delegation. Assigned by the app so the resolver always sees
-   *  the current bot roster, vault keys, and selected model. The sub-run it
-   *  performs is a pure chat completion (includeTools: false). */
+  /** The app resolves the target and, for scoped calls, verifies the target
+   *  installation against this handle before starting a tool-less sub-run. */
   public delegateResolver:
-    | ((botRef: string, task: string, signal: AbortSignal) => Promise<DelegateResult>)
+    | ((botRef: string, task: string, signal: AbortSignal, scope?: WorkspaceDelegationScope) => Promise<DelegateResult>)
     | null = null;
+
+  private async closeWorkspaceRun(run: RunContext): Promise<void> {
+    const workspace = run.workspace;
+    if (workspace?.actor) {
+      // Stop and normal settlement share a single native revocation.
+      await (workspace.closing ??= TauriBridge.endWorkspaceRun(workspace.actor.handle));
+    }
+  }
 
   /** True while a run has not fully settled (Stop requested but pending). */
   public isBusy(): boolean {
@@ -123,6 +158,7 @@ export class AgentLoop {
       });
     }
     run.runningShellCalls.clear();
+    if (run.workspace) void this.closeWorkspaceRun(run).catch(() => {});
     return true;
   }
 
@@ -141,7 +177,8 @@ export class AgentLoop {
     onAddEntry: (entry: TranscriptEntry) => void,
     onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean, revision?: string) => void) => void,
     /** Team Rooms: persona that authors this run's assistant entries. */
-    authorBotId?: string
+    authorBotId?: string,
+    scope?: WorkspaceRunScope
   ): Promise<RunOutcome> {
     if (this.activeRun) return "cancelled";
 
@@ -155,6 +192,12 @@ export class AgentLoop {
       runningShellCalls: new Map(),
       failedActions: new Map(),
       hasBlockedAction: false,
+      workspace: scope ? {
+        workspaceId: scope.workspaceId,
+        installationId: scope.installationId,
+        allowedTools: new Set(SCOPED_TOOLS.filter((tool) => scope.tools.includes(tool))),
+        historicalEntryCount: transcript.length,
+      } : undefined,
     };
     this.activeRun = run;
     try {
@@ -163,9 +206,22 @@ export class AgentLoop {
         onUpdateEntry, onAddEntry, onNeedsApproval, run, authorBotId
       );
     } finally {
-      // Identity check: only the owning run clears itself. A stale settle
-      // can no longer detach a newer run's controller or approvals.
-      if (this.activeRun === run) this.activeRun = null;
+      try {
+        if (run.workspace) await this.closeWorkspaceRun(run);
+      } catch (err) {
+        run.hadError = true;
+        if (!run.aborted) onAddEntry({
+          id: `asst_${run.id}_cleanup`,
+          threadId,
+          role: "assistant",
+          ...(authorBotId ? { authorBotId } : {}),
+          content: `**Error:** Could not close the workspace run: ${err instanceof Error ? err.message : String(err)}`,
+          timestamp: Date.now(),
+        });
+      } finally {
+        // Only the owning run clears itself, after native revocation settles.
+        if (this.activeRun === run) this.activeRun = null;
+      }
     }
     if (run.aborted) return "cancelled";
     if (run.hadError || run.hasBlockedAction || run.failedActions.size) return "failed";
@@ -187,37 +243,41 @@ export class AgentLoop {
   ): Promise<void> {
     const signal = run.controller.signal;
 
-    // Prepare message history for the model
+    const workspace = run.workspace;
     const messagesPayload: ChatMessagePayload[] = [];
-    for (const entry of transcript) {
+    const usedWireIds = new Set<string>();
+    for (const [index, entry] of transcript.entries()) {
       if (entry.role === "user") {
         messagesPayload.push({ role: "user", content: entry.content });
       } else if (entry.role === "assistant") {
-        const toolCallsPayload = entry.toolCalls?.map((tc) => ({
-          id: tc.id,
-          type: "function",
-          function: {
-            name: tc.name,
-            arguments: JSON.stringify(tc.arguments),
-          },
-        }));
-
+        // Old tool data may belong to a different installation or a revoked
+        // grant. Only this run's live tool rounds get replayed in scoped turns.
+        const calls = workspace && index < workspace.historicalEntryCount ? [] : entry.toolCalls ?? [];
+        if (workspace && !calls.length && !entry.content.trim()) continue;
+        const toolCallsPayload = calls.map((tc) => {
+          let wireId = tc.providerCallId || tc.id;
+          if (usedWireIds.has(wireId)) wireId = tc.id;
+          while (usedWireIds.has(wireId)) wireId += "_local";
+          usedWireIds.add(wireId);
+          return {
+            id: wireId,
+            type: "function",
+            function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+          };
+        });
         messagesPayload.push({
           role: "assistant",
           content: entry.content,
-          tool_calls: toolCallsPayload && toolCallsPayload.length > 0 ? toolCallsPayload : undefined,
+          tool_calls: toolCallsPayload.length ? toolCallsPayload : undefined,
         });
-
-        if (entry.toolCalls) {
-          for (const tc of entry.toolCalls) {
-            messagesPayload.push({
-              role: "tool",
-              tool_call_id: tc.id,
-              name: tc.name,
-              content: [`Tool status: ${tc.status}`, tc.result?.error, tc.result?.output]
-                .filter(Boolean).join("\n"),
-            });
-          }
+        for (const [callIndex, tc] of calls.entries()) {
+          messagesPayload.push({
+            role: "tool",
+            tool_call_id: toolCallsPayload[callIndex].id,
+            name: tc.name,
+            content: [`Tool status: ${tc.status}`, tc.result?.error, tc.result?.output]
+              .filter(Boolean).join("\n"),
+          });
         }
       }
     }
@@ -243,6 +303,17 @@ export class AgentLoop {
     onAddEntry(assistantEntry);
 
     try {
+      if (signal.aborted) return;
+      // CLI models are refused by the scoped stream guard without opening a
+      // native run. Every supported scoped turn, including chat-only, opens
+      // exactly one run for all its tool rounds.
+      if (workspace && round === 0 && !isCliModel(model)) {
+        const { workspaceId, installationId } = workspace;
+        const handle = await TauriBridge.startWorkspaceRun(workspaceId, installationId);
+        if (typeof handle !== "string" || !handle) throw new Error("Could not open the workspace run.");
+        workspace.actor = { handle, workspaceId, installationId };
+        if (signal.aborted) return;
+      }
       await streamChatCompletion(
         model,
         vault,
@@ -256,6 +327,7 @@ export class AgentLoop {
               thinking: currentThinking,
               isThinkingActive: true,
               thinkingDurationMs: Date.now() - startTime,
+              toolCalls: [...toolCalls],
             });
           },
           onContentDelta: (delta) => {
@@ -266,10 +338,16 @@ export class AgentLoop {
               thinking: currentThinking,
               isThinkingActive: false,
               thinkingDurationMs: Date.now() - startTime,
+              toolCalls: [...toolCalls],
             });
           },
           onToolCall: (toolCall) => {
-            toolCalls.push(toolCall);
+            toolCalls.push({
+              ...toolCall,
+              providerCallId: toolCall.id,
+              id: `tool_${run.id}_${round}_${toolCalls.length}`,
+              status: "queued",
+            });
             onUpdateEntry({
               ...assistantEntry,
               content: currentContent,
@@ -281,7 +359,8 @@ export class AgentLoop {
         },
         signal,
         // The persona's temperature affects the request (where supported).
-        bot.temperature
+        bot.temperature,
+        workspace ? { allowedTools: workspace.allowedTools } : undefined
       );
 
       if (run.aborted || signal.aborted) return;
@@ -310,14 +389,15 @@ export class AgentLoop {
               toolCalls: [...toolCalls],
             });
           };
-          if (!model.supportsTools || !toolActionKey(tc)) {
+          const actor = workspace?.actor;
+          if (!model.supportsTools || (workspace && (!actor || !workspace.allowedTools.has(tc.name))) || !toolActionKey(tc)) {
             run.hasBlockedAction = true;
             tc.status = "failed";
             tc.result = { error: `Tool ${tc.name || "(unnamed)"} is unavailable for this turn.` };
             updateCall(tc);
             continue;
           }
-          await this.executeToolWithSafety(tc, bot, vault, run, updateCall, onNeedsApproval);
+          await this.executeToolWithSafety(tc, bot, vault, run, updateCall, onNeedsApproval, actor);
           recordToolOutcome(run, tc, round);
           if (tc.recoveredToolCallIds) updateCall(tc);
         }
@@ -354,7 +434,7 @@ export class AgentLoop {
       // A response that never completed must not leave tool calls armed:
       // reject anything still pending so it can never execute later.
       for (const tc of toolCalls) {
-        if (tc.status === "pending_approval") {
+        if (tc.status === "queued" || tc.status === "pending_approval") {
           tc.status = "rejected";
           tc.result = {
             error:
@@ -369,11 +449,28 @@ export class AgentLoop {
         content:
           currentContent +
           (currentContent ? "\n\n" : "") +
-          `**Error:** ${err.message}`,
+          `**Error:** ${err instanceof Error ? err.message : String(err)}`,
         isThinkingActive: false,
         thinkingDurationMs: Date.now() - startTime,
         toolCalls: [...toolCalls],
       });
+    } finally {
+      if (signal.aborted && toolCalls.some((tc) => tc.status === "queued")) {
+        for (const tc of toolCalls) {
+          if (tc.status === "queued") {
+            tc.status = "rejected";
+            tc.result = { error: "Cancelled by user (Stop). Nothing was executed." };
+          }
+        }
+        onUpdateEntry({
+          ...assistantEntry,
+          content: currentContent,
+          thinking: currentThinking,
+          isThinkingActive: false,
+          thinkingDurationMs: Date.now() - startTime,
+          toolCalls: [...toolCalls],
+        });
+      }
     }
   }
 
@@ -383,14 +480,15 @@ export class AgentLoop {
     vault: VaultConfig,
     run: RunContext,
     onUpdate: (tc: ToolCallItem) => void,
-    onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean, revision?: string) => void) => void
+    onNeedsApproval: (toolCall: ToolCallItem, resolve: (approved: boolean, revision?: string) => void) => void,
+    actor?: WorkspaceDelegationScope
   ): Promise<void> {
     /** Mark the tool cancelled — used after every awaited preflight, so a
      *  Stop that lands mid-check never lets the action proceed. */
-    const cancelTool = () => {
+    const cancelTool = (message = "Cancelled by user (Stop). Nothing was executed.") => {
       toolCall.status = "rejected";
       toolCall.result = {
-        error: "Cancelled by user (Stop). Nothing was executed.",
+        error: message,
         ...(toolCall.result?.diff ? { diff: toolCall.result.diff } : {}),
       };
       onUpdate(toolCall);
@@ -460,11 +558,10 @@ export class AgentLoop {
       // execute_shell registers the exact command and working directory.
       if (toolCall.name === "write_file") {
         try {
-          const prop = await TauriBridge.createWriteProposal(
-            toolCall.arguments.path,
-            toolCall.arguments.content ?? "",
-            run.id
-          );
+          const { path, content } = toolCall.arguments;
+          const prop = actor
+            ? await TauriBridge.workspaceCreateWriteProposal(actor.handle, path, content)
+            : await TauriBridge.createWriteProposal(path, content ?? "", run.id);
           toolCall.proposalId = prop.id;
           run.pendingProposals.add(prop.id);
           toolCall.result = {
@@ -505,18 +602,15 @@ export class AgentLoop {
       // Stop during a preflight must not register a fresh approval nothing
       // will ever resolve.
       if (run.aborted) {
-        if (toolCall.proposalId) {
+        if (toolCall.proposalId && run.pendingProposals.delete(toolCall.proposalId)) {
           TauriBridge.cancelProposal(toolCall.proposalId).catch(() => {});
-          run.pendingProposals.delete(toolCall.proposalId);
         }
         return cancelTool();
       }
 
+      // Register the resolver before publishing an actionable card. Queued
+      // provider calls must not be approvable until their own preflight ends.
       toolCall.status = "pending_approval";
-      onUpdate(toolCall);
-
-      // The wrapped resolver also unregisters itself from the run's pending
-      // approvals, so abort() only cancels approvals still awaiting a decision.
       const { approved, revision } = await new Promise<{ approved: boolean; revision?: string }>((resolve) => {
         const wrapped = (approved: boolean, revision?: string) => {
           run.pendingApprovals.delete(wrapped);
@@ -524,16 +618,16 @@ export class AgentLoop {
         };
         run.pendingApprovals.add(wrapped);
         onNeedsApproval(toolCall, wrapped);
+        if (!run.aborted) onUpdate(toolCall);
       });
 
       if (!approved) {
-        if (toolCall.proposalId) {
+        if (toolCall.proposalId && run.pendingProposals.delete(toolCall.proposalId)) {
           if (run.aborted) {
             TauriBridge.cancelProposal(toolCall.proposalId).catch(() => {});
           } else {
             TauriBridge.rejectProposal(toolCall.proposalId).catch(() => {});
           }
-          run.pendingProposals.delete(toolCall.proposalId);
         }
         toolCall.status = "rejected";
         toolCall.result = {
@@ -551,14 +645,31 @@ export class AgentLoop {
         TauriBridge.recordRejectionAudit(
           toolCall.name,
           run.aborted ? "cancelled" : "rejected",
-          toolCall.arguments.command ?? null,
+          actor ? null : toolCall.arguments.command ?? null,
           toolCall.arguments.path ?? null
         ).catch(() => {});
         return;
       }
 
-      // User approved: approve natively in Rust registry
-      if (toolCall.proposalId) {
+      // The scoped write requires a genuine native approval. Keep the token
+      // tracked until execution settles, so Stop can still cancel it.
+      if (actor) {
+        const proposalId = toolCall.proposalId;
+        try {
+          if (!proposalId || await TauriBridge.approveProposal(proposalId) !== true) {
+            throw new Error("The write proposal could not be approved.");
+          }
+        } catch (err) {
+          if (proposalId && run.pendingProposals.delete(proposalId)) {
+            TauriBridge.cancelProposal(proposalId).catch(() => {});
+          }
+          if (run.aborted) return cancelTool();
+          toolCall.status = "failed";
+          toolCall.result = { ...toolCall.result, error: err instanceof Error ? err.message : String(err) };
+          onUpdate(toolCall);
+          return;
+        }
+      } else if (toolCall.proposalId) {
         await TauriBridge.approveProposal(toolCall.proposalId).catch(() => {});
         run.pendingProposals.delete(toolCall.proposalId);
       }
@@ -566,19 +677,17 @@ export class AgentLoop {
     }
 
     if (run.aborted) {
-      if (toolCall.proposalId) {
+      if (toolCall.proposalId && (!actor || run.pendingProposals.delete(toolCall.proposalId))) {
         TauriBridge.cancelProposal(toolCall.proposalId).catch(() => {});
         run.pendingProposals.delete(toolCall.proposalId);
       }
-      toolCall.status = "rejected";
-      toolCall.result = { error: "Cancelled by user (Stop)." };
-      onUpdate(toolCall);
-      return;
+      return cancelTool("Cancelled by user (Stop).");
     }
 
     // 2. Execution
     toolCall.status = "running";
     onUpdate(toolCall);
+    if (actor && run.aborted) return cancelTool();
 
     try {
       if (toolCall.name === "execute_shell") {
@@ -606,10 +715,11 @@ export class AgentLoop {
           executionTimeMs: Number(res.execution_time_ms),
         };
       } else if (toolCall.name === "read_file") {
-        const res = await TauriBridge.readFileContent(
-          toolCall.arguments.path,
-          toolCall.arguments.max_lines
-        );
+        const { path, max_lines: maxLines } = toolCall.arguments;
+        const res = actor
+          ? await TauriBridge.workspaceReadFile(actor.handle, path, maxLines)
+          : await TauriBridge.readFileContent(path, maxLines);
+        if (actor && run.aborted) return cancelTool("Cancelled by user (Stop).");
         toolCall.status = "completed";
         toolCall.result = {
           output: res.content,
@@ -623,12 +733,16 @@ export class AgentLoop {
             ...(reviewed ? { diff: reviewed } : {}),
           };
         } else {
-          const res = await TauriBridge.writeFileContent(
-            toolCall.arguments.path,
-            toolCall.arguments.content,
-            decision,
-            toolCall.proposalId
-          );
+          const { path, content } = toolCall.arguments;
+          const proposalId = toolCall.proposalId;
+          let res;
+          if (actor) {
+            if (!proposalId) throw new Error("An approved write proposal is required.");
+            res = await TauriBridge.workspaceWriteFile(actor.handle, path, content, proposalId);
+            run.pendingProposals.delete(proposalId);
+          } else {
+            res = await TauriBridge.writeFileContent(path, content, decision, proposalId);
+          }
           toolCall.status = res.success ? "completed" : "failed";
           toolCall.result = {
             ...(res.success
@@ -638,7 +752,11 @@ export class AgentLoop {
           };
         }
       } else if (toolCall.name === "list_directory") {
-        const entries = await TauriBridge.listDirEntries(toolCall.arguments.path);
+        const { path } = toolCall.arguments;
+        const entries = actor
+          ? await TauriBridge.workspaceListDirectory(actor.handle, path)
+          : await TauriBridge.listDirEntries(path);
+        if (actor && run.aborted) return cancelTool("Cancelled by user (Stop).");
         toolCall.status = "completed";
         toolCall.result = {
           output: entries
@@ -650,11 +768,12 @@ export class AgentLoop {
           toolCall.status = "failed";
           toolCall.result = { error: "Delegation is unavailable." };
         } else {
-          const res = await this.delegateResolver(
-            String(toolCall.arguments.bot || ""),
-            String(toolCall.arguments.task || ""),
-            run.controller.signal
-          );
+          const botRef = String(toolCall.arguments.bot || "");
+          const task = String(toolCall.arguments.task || "");
+          const signal = run.controller.signal;
+          const res = actor
+            ? await this.delegateResolver(botRef, task, signal, { ...actor })
+            : await this.delegateResolver(botRef, task, signal);
           if (run.aborted) {
             toolCall.status = "rejected";
             toolCall.result = { error: "Cancelled by user (Stop)." };
@@ -676,15 +795,17 @@ export class AgentLoop {
         }
       }
     } catch (err: any) {
-      if (run.aborted) {
-        toolCall.status = "rejected";
-        toolCall.result = { error: "Cancelled by user (Stop). Nothing was executed." };
-      } else {
-        toolCall.status = "failed";
-        toolCall.result = {
-          error: err.message || String(err),
-        };
+      if (actor && toolCall.proposalId && run.pendingProposals.delete(toolCall.proposalId)) {
+        TauriBridge.cancelProposal(toolCall.proposalId).catch(() => {});
       }
+      const diff = actor ? toolCall.result?.diff : undefined;
+      toolCall.status = run.aborted ? "rejected" : "failed";
+      toolCall.result = {
+        error: run.aborted
+          ? actor ? "Cancelled by user (Stop)." : "Cancelled by user (Stop). Nothing was executed."
+          : err.message || String(err),
+        ...(diff ? { diff } : {}),
+      };
     }
 
     onUpdate(toolCall);

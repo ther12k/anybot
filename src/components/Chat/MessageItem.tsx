@@ -9,9 +9,10 @@ import "./chat.css";
 
 interface MessageItemProps {
   entry: TranscriptEntry;
-  bot: BotPersona;
+  bot: Pick<BotPersona, "name" | "avatar">;
   isStreaming?: boolean;
   onFork?: () => void;
+  canReviewTool?: (toolCallId: string) => boolean;
   onApproveTool?: (toolCallId: string) => void;
   onAlwaysAllowTool?: (toolCallId: string) => void;
   onRejectTool?: (toolCallId: string) => void;
@@ -23,6 +24,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   bot,
   isStreaming = false,
   onFork,
+  canReviewTool,
   onApproveTool,
   onAlwaysAllowTool,
   onRejectTool,
@@ -53,8 +55,8 @@ export const MessageItem: React.FC<MessageItemProps> = ({
       </span>
       <div className="message-body">
         <div className="message-byline">
-          <span className="min-w-0 break-words">{isUser ? "You" : bot.name}</span>
-          {Number.isFinite(timestamp.getTime()) && (
+          <span className="min-w-0 break-words">{isUser ? entry.importedFrom ? "Original user" : "You" : bot.name}</span>
+          {Number.isFinite(timestamp.getTime()) && (!entry.importedFrom || entry.timestamp > 0) && (
             <time dateTime={timestamp.toISOString()}>
               {timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
             </time>
@@ -75,20 +77,21 @@ export const MessageItem: React.FC<MessageItemProps> = ({
             )}
             {(entry.content || isStreaming) && (
               <div className="message-text transcript-prose break-words select-text">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.content}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+                  // Model replies must not make network requests just by rendering.
+                  img: ({ alt }) => <span>{alt ? `[Image: ${alt}]` : "[Image]"}</span>,
+                }}>{entry.content}</ReactMarkdown>
                 {isStreaming && <span className="stream-cursor" aria-hidden="true" />}
               </div>
             )}
-            {entry.toolCalls?.map((toolCall) => (
-              <ToolCard
-                key={toolCall.id}
-                toolCall={toolCall}
-                onApprove={onApproveTool}
-                onAlwaysAllow={onAlwaysAllowTool}
-                onReject={onRejectTool}
-                onRequestChanges={onRequestToolChanges}
-              />
-            ))}
+            {entry.toolCalls?.map((toolCall) => {
+              const reviewing = toolCall.status === "pending_approval" && canReviewTool?.(toolCall.id);
+              return <ToolCard key={toolCall.id} toolCall={toolCall}
+                onApprove={reviewing ? onApproveTool : undefined}
+                onAlwaysAllow={reviewing ? onAlwaysAllowTool : undefined}
+                onReject={reviewing ? onRejectTool : undefined}
+                onRequestChanges={reviewing ? onRequestToolChanges : undefined} />;
+            })}
             {!isStreaming && (entry.content || onFork) && (
               <div className="message-actions">
                 {entry.content && (

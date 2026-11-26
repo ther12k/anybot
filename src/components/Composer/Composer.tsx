@@ -14,12 +14,14 @@ interface ComposerProps {
   botName?: string;
   selectedModel: AIModel;
   onSelectModel: (model: AIModel) => void;
+  allowCliModels?: boolean;
+  workspaceToolsAvailable?: boolean;
   /** Team Room members — present enables @mention autocomplete. */
   mentionCandidates?: BotPersona[];
 }
 
 const modelGroups = [
-  { label: "Local CLI / ACP", models: AVAILABLE_MODELS.filter(isCliModel) },
+  { label: "Local CLI / ACP", models: AVAILABLE_MODELS.filter(isCliModel), cli: true },
   { label: "Provider APIs & local models", models: AVAILABLE_MODELS.filter((model) => !isCliModel(model)) },
 ];
 const mentionPattern = /(?:^|[^\w@-])@([\w-]*)$/;
@@ -33,6 +35,8 @@ export const Composer: React.FC<ComposerProps> = ({
   botName,
   selectedModel,
   onSelectModel,
+  allowCliModels = true,
+  workspaceToolsAvailable,
   mentionCandidates,
 }) => {
   const [input, setInput] = useState("");
@@ -162,7 +166,7 @@ export const Composer: React.FC<ComposerProps> = ({
   const messageLabel = mentionCandidates ? "Message the room" : botName ? `Message ${botName}` : "Message your agent";
   const statusText = isStopping ? "Stopping… waiting for the run to settle" : isAwaitingApproval ? "Waiting for your review" : "Working on your request…";
   const cli = isCliModel(selectedModel);
-  const toolsLabel = cli ? "Tools: CLI-managed" : selectedModel.supportsTools ? "Tools: Available" : "Tools: Off";
+  const toolsLabel = cli ? "Tools: CLI-managed" : selectedModel.supportsTools && workspaceToolsAvailable !== false ? "Tools: Available" : "Tools: Off";
 
   return (
     <div className="composer-wrap">
@@ -264,7 +268,7 @@ export const Composer: React.FC<ComposerProps> = ({
             </button>
             {isModelDropdownOpen && (
               <div className="option-list composer-model-list" id={modelId} role="group" aria-label="Choose model">
-                {modelGroups.map(({ label, models }) => (
+                {modelGroups.filter((group) => allowCliModels || !group.cli).map(({ label, models }) => (
                   <div key={label}>
                     <div className="modal-label">{label}</div>
                     {models.map((model) => (

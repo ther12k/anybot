@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use crate::commands::fs::is_protected_file;
+use crate::workspace::{MAX_TEXT_BYTES, MAX_TEXT_MIB};
 
 // Serialize AnyBot's final check and publication, not staging. External
 // editors do not take this lock. Replacing an existing file is not a CAS.
@@ -82,14 +83,29 @@ pub(crate) struct ReviewedFile {
 
 impl ReviewedFile {
     pub(crate) fn inspect(requested: &Path) -> Result<(Self, String), String> {
+        Self::inspect_inner(requested, |_| Ok(()), false)
+    }
+
+    pub(crate) fn inspect_with_scope(
+        requested: &Path,
+        check: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> Result<(Self, String), String> {
+        Self::inspect_inner(requested, check, true)
+    }
+
+    fn inspect_inner(
+        requested: &Path,
+        check: impl FnOnce(&Path) -> Result<(), String>,
+        scoped: bool,
+    ) -> Result<(Self, String), String> {
         let (target, parent) = resolve_target(requested)?;
+        // Check the canonical parent plus the original leaf before reading
+        // the review snapshot. open_target must see the leaf, not the
+        // destination of a symlink, so its link checks remain effective.
+        check(&target)?;
         let (original, before) = match open_target(&target)? {
             Some((mut file, stamp)) => {
-                let mut bytes = Vec::new();
-                (&mut file)
-                    .take(stamp.len.saturating_add(1))
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| format!("Cannot read the file for review: {e}"))?;
+                let bytes = read_snapshot(&mut file, stamp.len, scoped)?;
                 check_version(&target, &file, &stamp)?;
                 let digest = Sha256::digest(&bytes).into();
                 let text = String::from_utf8(bytes).map_err(|_| {
@@ -341,6 +357,30 @@ fn check_version(path: &Path, file: &File, expected: &FileStamp) -> Result<(), S
     Ok(())
 }
 
+fn read_snapshot(reader: impl Read, advertised_len: u64, scoped: bool) -> Result<Vec<u8>, String> {
+    let oversized = || format!(
+        "Existing file exceeds the {MAX_TEXT_MIB} MiB workspace review limit. Edit it outside the workspace tool."
+    );
+    let limit = if scoped {
+        if advertised_len > MAX_TEXT_BYTES as u64 {
+            return Err(oversized());
+        }
+        // Do not rely on metadata alone: independently cap the bytes read.
+        MAX_TEXT_BYTES as u64 + 1
+    } else {
+        advertised_len.saturating_add(1)
+    };
+    let mut bytes = Vec::new();
+    reader
+        .take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Cannot read the file for review: {e}"))?;
+    if scoped && bytes.len() > MAX_TEXT_BYTES {
+        return Err(oversized());
+    }
+    Ok(bytes)
+}
+
 fn digest_file(file: &mut File, len: u64) -> Result<[u8; 32], String> {
     let mut reader = file.take(len.saturating_add(1));
     let mut digest = Sha256::new();
@@ -363,6 +403,14 @@ fn changed_file() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_snapshot_caps_actual_bytes_even_when_metadata_understates_length() {
+        let mut reader = io::Cursor::new(vec![0; MAX_TEXT_BYTES + 32]);
+        let error = read_snapshot(&mut reader, 0, true).unwrap_err();
+        assert!(error.contains("1 MiB workspace review limit"), "{error}");
+        assert_eq!(reader.position(), (MAX_TEXT_BYTES + 1) as u64);
+    }
 
     #[test]
     fn ordinary_save_after_staging_is_preserved() {
